@@ -22,10 +22,11 @@ MacUI.Version = "3.0 - Sonoma"
 
 --// Require Addons
 local success, ThemeManager = pcall(function()
-	return loadstring(game:HttpGet("https://raw.githubusercontent.com/YourName/MacUI/main/Addons/ThemeManager.lua"))()
+	return loadstring(game:HttpGet("https://raw.githubusercontent.com/Kiwzu/Mac-OS-UI-LUA/refs/heads/main/ThemeManager.lua"))()
 end)
 local success2, AccentManager = pcall(function()
-	return loadstring(game:HttpGet("https://raw.githubusercontent.com/YourName/MacUI/main/Addons/AccentManager.lua"))()
+	return loadstring(game:HttpGet("https://raw.githubusercontent.com/Kiwzu/Mac-OS-UI-LUA/refs/heads/main/AccentManager.lua"))()
+
 end)
 
 -- Fallback
@@ -300,3 +301,4 @@ function MacUI:CreateWindow(config)
 end
 
 return MacUI
+
