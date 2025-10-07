@@ -4,11 +4,13 @@
 --========================================================
 
 --// Import main framework and addons
-local MacUI = loadstring(game:HttpGet("https://raw.githubusercontent.com/Kiwzu/MacUI/main/MacUIFramework.lua"))()
-local SaveManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/Kiwzu/MacUI/main/Addons/SaveManager.lua"))()
-local InterfaceManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/Kiwzu/MacUI/main/Addons/InterfaceManager.lua"))()
-local ThemeManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/Kiwzu/MacUI/main/Addons/ThemeManager.lua"))()
-local AccentManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/Kiwzu/MacUI/main/Addons/AccentManager.lua"))()
+
+local MacUI = loadstring(game:HttpGet("https://raw.githubusercontent.com/Kiwzu/Mac-OS-UI-LUA/refs/heads/main/MacUIFramework.lua"))()
+local SaveManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/Kiwzu/Mac-OS-UI-LUA/refs/heads/main/SaveManager.lua"))()
+local InterfaceManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/Kiwzu/Mac-OS-UI-LUA/refs/heads/main/InterfaceManager.lua"))()
+local ThemeManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/Kiwzu/Mac-OS-UI-LUA/refs/heads/main/ThemeManager.lua"))()
+local AccentManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/Kiwzu/Mac-OS-UI-LUA/refs/heads/main/AccentManager.lua"))()
+
 
 --// Connect managers to the main library
 SaveManager:SetLibrary(MacUI)
@@ -168,3 +170,4 @@ MacUI:Notify({
 })
 
 SaveManager:LoadAutoloadConfig()
+
