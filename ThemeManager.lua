@@ -1,91 +1,74 @@
 --========================================================
--- 🍎 MacUI AccentManager.lua  (Sonoma Edition)
--- Handles dynamic accent colors & smooth transitions
+-- 🍎 MacUI ThemeManager.lua  (Sonoma Edition)
+-- Handles Light/Dark mode, blur transition, and accent sync
 --========================================================
 
 local TweenService = game:GetService("TweenService")
 
-local AccentManager = {}
-AccentManager.__index = AccentManager
+local ThemeManager = {}
+ThemeManager.__index = ThemeManager
+ThemeManager.CurrentTheme = "Dark"
 
--- Default accent
-AccentManager.CurrentAccent = Color3.fromRGB(90, 170, 255)
-
--- Preset macOS accent palette
-AccentManager.Accents = {
-	Blue      = Color3.fromRGB(90, 170, 255),
-	Purple    = Color3.fromRGB(175, 140, 255),
-	Pink      = Color3.fromRGB(255, 120, 200),
-	Red       = Color3.fromRGB(255, 95, 95),
-	Orange    = Color3.fromRGB(255, 160, 90),
-	Yellow    = Color3.fromRGB(255, 200, 80),
-	Green     = Color3.fromRGB(80, 220, 140),
-	Mint      = Color3.fromRGB(120, 255, 230),
-	Graphite  = Color3.fromRGB(160, 160, 165),
+--// Default Theme Palettes
+ThemeManager.Colors = {
+	Dark = {
+		Background = Color3.fromRGB(38, 38, 42),
+		Sidebar = Color3.fromRGB(30, 30, 34),
+		Text = Color3.fromRGB(235, 235, 235),
+		Element = Color3.fromRGB(55, 55, 60)
+	},
+	Light = {
+		Background = Color3.fromRGB(238, 238, 244),
+		Sidebar = Color3.fromRGB(225, 225, 230),
+		Text = Color3.fromRGB(40, 40, 45),
+		Element = Color3.fromRGB(210, 210, 220)
+	}
 }
 
--- Animation speed
-AccentManager.TweenTime = 0.25
+--// Active Colors table (runtime cache)
+ThemeManager.ThemeColors = ThemeManager.Colors.Dark
 
--- Tween helper
+--// Helper tween
 local function Tween(obj, props)
-	TweenService:Create(obj, TweenInfo.new(AccentManager.TweenTime, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), props):Play()
+	TweenService:Create(obj, TweenInfo.new(0.35, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), props):Play()
 end
 
--- Storage of all accent-linked UI objects
-AccentManager.LinkedObjects = {}
-
--- Link UI object to accent updates
-function AccentManager:Link(obj, prop)
-	table.insert(self.LinkedObjects, {Object = obj, Property = prop})
-	obj[prop] = self.CurrentAccent
+--// ✅ Accent Connection (from AccentManager)
+function ThemeManager:LinkAccent(accentFunc)
+	self.GetAccent = accentFunc
 end
 
--- Smooth color update for all linked objects
-function AccentManager:ApplyAccent(newColor)
-	for _, data in ipairs(self.LinkedObjects) do
-		if data.Object and data.Object.Parent then
-			Tween(data.Object, {[data.Property] = newColor})
-		end
-	end
+--// Apply Theme instantly
+function ThemeManager:ApplyTheme(mode)
+	mode = mode or "Dark"
+	local target = ThemeManager.Colors[mode]
+	if not target then return end
+	ThemeManager.CurrentTheme = mode
+	ThemeManager.ThemeColors = target
 end
 
--- Change accent by name or Color3
-function AccentManager:ChangeAccent(accent)
-	local color = nil
-	if typeof(accent) == "Color3" then
-		color = accent
-	elseif typeof(accent) == "string" then
-		color = self.Accents[accent] or self.CurrentAccent
-	end
+--// Smooth transition with blur overlay
+function ThemeManager:Transition(rootUI, newMode)
+	newMode = newMode or (self.CurrentTheme == "Dark" and "Light" or "Dark")
 
-	if color then
-		self.CurrentAccent = color
-		self:ApplyAccent(color)
-	end
+	local Fade = Instance.new("Frame", rootUI)
+	Fade.BackgroundColor3 = ThemeManager.ThemeColors.Background
+	Fade.BackgroundTransparency = 1
+	Fade.Size = UDim2.new(1,0,1,0)
+	Fade.ZIndex = 999
+	Tween(Fade, {BackgroundTransparency = 0.1})
+	task.wait(0.15)
+
+	self:ApplyTheme(newMode)
+	Tween(Fade, {BackgroundTransparency = 1})
+	task.wait(0.3)
+	Fade:Destroy()
 end
 
--- Build a dropdown UI for selecting accent (optional helper)
-function AccentManager:BuildAccentDropdown(parent, callback)
-	local accents = {}
-	for name, _ in pairs(self.Accents) do
-		table.insert(accents, name)
-	end
-	table.sort(accents)
-	
-	local Dropdown = parent:AddDropdown("AccentSelector", {
-		Title = "Accent Color",
-		Values = accents,
-		Multi = false,
-		Default = "Blue",
-	})
-	
-	Dropdown:OnChanged(function(value)
-		self:ChangeAccent(value)
-		if callback then callback(value) end
-	end)
-	
-	return Dropdown
+--// Retrieve a theme color
+function ThemeManager:GetColor(which)
+	local t = self.ThemeColors
+	return t[which] or Color3.fromRGB(255,255,255)
 end
 
-return AccentManager
+return ThemeManager
