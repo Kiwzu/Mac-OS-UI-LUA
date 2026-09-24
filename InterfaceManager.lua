@@ -1,8 +1,9 @@
 --[[
 	MacUI · InterfaceManager
 	Builds the "Interface" settings section (theme, accent, frosted glass,
-	scale, motion, shortcut list, window memory, toggle key) and remembers
-	those choices between sessions. API-compatible with Fluent's
+	scale, motion, frame-rate protection, shortcut list, window memory,
+	toggle key) and remembers those choices between sessions, along with
+	what Spotlight learned about the settings you use most. API-compatible with Fluent's
 	InterfaceManager.
 
 	InterfaceManager:SetLibrary(MacUI)
@@ -26,6 +27,7 @@ local InterfaceManager = {
 		MenuKeybind = "RightControl",
 		Acrylic = false,
 		ReduceMotion = false,
+		PerformanceGuard = false,
 		ShortcutList = false,
 		RememberWindow = true,
 		Window = nil, -- last position, size, page and sidebar state
@@ -120,6 +122,7 @@ function InterfaceManager:BuildInterfaceSection(tab)
 		end
 	end
 	settings.ReduceMotion = library.ReduceMotion == true
+	settings.PerformanceGuard = library.PerformanceGuard == true
 	local first = library.Windows and library.Windows[1]
 	if first then
 		settings.Acrylic = first.Acrylic == true
@@ -144,6 +147,17 @@ function InterfaceManager:BuildInterfaceSection(tab)
 	end
 	if saved.ReduceMotion ~= nil and library.SetReduceMotion then
 		library:SetReduceMotion(saved.ReduceMotion == true)
+	end
+	-- what Spotlight learned about which settings get used most
+	if type(saved.Usage) == "table" and library.SetUsage then
+		library:SetUsage(saved.Usage)
+	end
+	if library.UsageChanged then
+		library.UsageChanged:Connect(function()
+			if ready then
+				self:Set("Usage", library:GetUsage())
+			end
+		end)
 	end
 
 	local section = tab:AddSection({
@@ -268,6 +282,22 @@ function InterfaceManager:BuildInterfaceSection(tab)
 			end
 		end,
 	})
+
+	if library.SetPerformanceGuard then
+		section:AddToggle("InterfacePerformanceGuard", {
+			Title = "Protect frame rate",
+			Description = "Pause blur and animations while the game is running slowly.",
+			Default = settings.PerformanceGuard == true,
+			Callback = function(value)
+				if value ~= (library.PerformanceGuard == true) then
+					library:SetPerformanceGuard(value)
+				end
+				if ready then
+					self:Set("PerformanceGuard", value)
+				end
+			end,
+		})
+	end
 
 	section:AddToggle("InterfaceShortcutList", {
 		Title = "Shortcut list",

@@ -7,7 +7,7 @@
 
 	MacUI — a macOS System Settings–style interface library for Roblox.
 
-	Version : 4.2.0
+	Version : 4.3.0
 	Author  : Kiwzu  (https://github.com/Kiwzu/Mac-OS-UI-LUA)
 	Icons   : Lucide (ISC license) via the asset ids published with Fluent (MIT)
 
@@ -16,7 +16,7 @@
 ]]
 
 local MacUI = {
-	Version = "4.2.0",
+	Version = "4.3.0",
 	Options = {},
 	Windows = {},
 	Unloaded = false,
@@ -355,6 +355,40 @@ MacUI.ThemesChanged = Signal.new()
 MacUI.OptionChanged = Signal.new()
 -- Fires when keybinds or element shortcuts change (drives the shortcut list).
 local ShortcutsChanged = Signal.new()
+-- Fires (element, message) when an element's callback errors.
+MacUI.CallbackError = Signal.new()
+-- Fires (paused) when the performance guard pauses or restores effects.
+MacUI.PerformanceChanged = Signal.new()
+-- Performance guard state (see MacUI:SetPerformanceGuard).
+local Guard = { Enabled = false, Engaged = false, Applying = false, MinFps = 30, Notify = true }
+-- Fires when a timer starts, finishes or is cancelled.
+MacUI.TimersChanged = Signal.new()
+
+-- Runs an element's callback on its own thread. An error also shows on the
+-- element's row as a red badge with the message (see RowMethods:_ShowError).
+local function RunCallback(element, fn, ...)
+	if type(fn) ~= "function" then
+		return
+	end
+	task.spawn(function(...)
+		local trace
+		local ok, err = xpcall(fn, function(message)
+			trace = debug.traceback(tostring(message), 2)
+			return message
+		end, ...)
+		if ok then
+			return
+		end
+		local message = tostring(err)
+		local title = element and element.Title
+		warn("[MacUI] callback error" .. (title and (' in "' .. tostring(title) .. '"') or "") .. ": " .. message)
+		local row = element and element.Row
+		if row and row._ShowError and not row.Destroyed then
+			row:_ShowError(message, trace)
+		end
+		MacUI.CallbackError:Fire(element, message)
+	end, ...)
+end
 
 -- Set while a keybind is recording so the same key press doesn't also
 -- trigger other keybinds or the window's show/hide key.
@@ -443,6 +477,11 @@ end
 -- Mouse position in the coordinate space of our ScreenGuis (IgnoreGuiInset = false).
 local function MousePosition()
 	return UserInputService:GetMouseLocation() - GuiService:GetGuiInset()
+end
+
+-- For text shown in RichText labels (error messages can contain < and >).
+local function EscapeRich(text)
+	return (tostring(text):gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;"))
 end
 
 local function CopyToClipboard(text)
@@ -935,6 +974,11 @@ function MacUI:PreviewTheme(tokens, base)
 end
 
 function MacUI:SetReduceMotion(enabled)
+	if Guard.Engaged and Guard.Saved then
+		-- effects are paused; this becomes the setting once they're restored
+		Guard.Saved.ReduceMotion = enabled == true
+		return
+	end
 	self.ReduceMotion = enabled == true
 end
 
@@ -962,6 +1006,21 @@ function MacUI:GetThemes()
 	end
 	table.sort(names)
 	return names
+end
+
+-- Elements whose callback failed: { Element, Message, Count }.
+function MacUI:GetErrors()
+	local list = {}
+	for _, window in ipairs(self.Windows) do
+		for _, tab in ipairs(window.Tabs or {}) do
+			for _, row in ipairs(tab.Rows) do
+				if row.ErrorMessage then
+					table.insert(list, { Element = row.Element, Message = row.ErrorMessage, Count = row.ErrorCount })
+				end
+			end
+		end
+	end
+	return list
 end
 
 function MacUI:SafeCallback(fn, ...)
@@ -1713,6 +1772,135 @@ end
 
 MacUI.OptionChanged:Connect(CheckDependencies)
 
+--------------------------------------------------------------------------------
+-- Timers: "turn this off in 30 minutes", "press this every 5 seconds"
+--------------------------------------------------------------------------------
+
+local DURATION_UNITS = {
+	s = 1, sec = 1, secs = 1, second = 1, seconds = 1,
+	m = 60, min = 60, mins = 60, minute = 60, minutes = 60,
+	h = 3600, hr = 3600, hrs = 3600, hour = 3600, hours = 3600,
+}
+
+-- "45s", "20m", "1h 30m", "1 hour and 5 minutes", "1:30" (m:ss), "1:02:03",
+-- or a bare number in `defaultUnit` ("m" unless given). Returns seconds or nil.
+local function ParseDuration(text, defaultUnit)
+	text = tostring(text or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
+	if text == "" then
+		return nil
+	end
+	local h, m, s = text:match("^(%d+):(%d%d):(%d%d)$")
+	if h then
+		return tonumber(h) * 3600 + tonumber(m) * 60 + tonumber(s)
+	end
+	m, s = text:match("^(%d+):(%d%d)$")
+	if m then
+		local total = tonumber(m) * 60 + tonumber(s)
+		return total > 0 and total or nil
+	end
+	local total, matched = 0, false
+	for number, unit in text:gmatch("(%d*%.?%d+)%s*(%a*)") do
+		local multiplier = DURATION_UNITS[unit ~= "" and unit or (defaultUnit or "m")]
+		if not multiplier or not tonumber(number) then
+			return nil
+		end
+		total += tonumber(number) * multiplier
+		matched = true
+	end
+	-- anything left over besides "and" and commas means it wasn't a duration
+	local rest = text:gsub("(%d*%.?%d+)%s*(%a*)", ""):gsub("and", ""):gsub("[%s,]", "")
+	if not matched or rest ~= "" or total <= 0 then
+		return nil
+	end
+	return total
+end
+
+-- 75 -> "1:15", 3725 -> "1:02:05"
+local function FormatClock(seconds)
+	seconds = math.max(math.ceil(seconds), 0)
+	local hours = math.floor(seconds / 3600)
+	local minutes = math.floor(seconds % 3600 / 60)
+	if hours > 0 then
+		return string.format("%d:%02d:%02d", hours, minutes, seconds % 60)
+	end
+	return string.format("%d:%02d", minutes, seconds % 60)
+end
+
+-- 90 -> "1 min 30 s"; with `long`, "1 Minute 30 Seconds" (menus)
+local function DescribeDuration(seconds, long)
+	seconds = math.max(math.floor(seconds + 0.5), 1)
+	local parts = {}
+	local function Add(amount, short, singular, plural)
+		if amount > 0 then
+			table.insert(parts, amount .. " " .. (long and (amount == 1 and singular or plural) or short))
+		end
+	end
+	local hours = math.floor(seconds / 3600)
+	local minutes = math.floor(seconds % 3600 / 60)
+	Add(hours, "h", "Hour", "Hours")
+	Add(minutes, "min", "Minute", "Minutes")
+	if hours == 0 then
+		Add(seconds % 60, "s", "Second", "Seconds")
+	end
+	return table.concat(parts, " ")
+end
+
+-- Running timers by row: { Ends, Value (toggles) or Interval (buttons), Icon, Fire }.
+local ActiveTimers = {}
+local timerLoopRunning = false
+
+local function EnsureTimerLoop()
+	if timerLoopRunning then
+		return
+	end
+	timerLoopRunning = true
+	task.spawn(function()
+		while next(ActiveTimers) ~= nil and not MacUI.Unloaded do
+			local now = os.clock()
+			for row, timer in pairs(table.clone(ActiveTimers)) do
+				if row.Destroyed then
+					ActiveTimers[row] = nil
+				elseif now >= timer.Ends then
+					SafeCall(timer.Fire, timer)
+				end
+				if ActiveTimers[row] == timer then
+					row:_RenderTimer()
+				end
+			end
+			task.wait(0.2)
+		end
+		timerLoopRunning = false
+	end)
+end
+
+-- Every running timer, soonest first: { Element, Remaining, Value (toggles)
+-- or Interval (buttons) }.
+function MacUI:GetTimers()
+	local list = {}
+	local now = os.clock()
+	for row, timer in pairs(ActiveTimers) do
+		table.insert(list, {
+			Element = row.Element,
+			Remaining = math.max(timer.Ends - now, 0),
+			Value = timer.Value,
+			Interval = timer.Interval,
+		})
+	end
+	table.sort(list, function(a, b)
+		return a.Remaining < b.Remaining
+	end)
+	return list
+end
+
+function MacUI:CancelTimers()
+	for row in pairs(table.clone(ActiveTimers)) do
+		row:_CancelTimer()
+	end
+end
+
+local TOGGLE_TIMER_PRESETS = { 60, 300, 900, 1800, 3600, 7200 }
+local BUTTON_REPEAT_PRESETS = { 5, 10, 30, 60, 300, 900 }
+
 local function CreateRow(container, info, options)
 	options = options or {}
 	local window = container.Window
@@ -1983,6 +2171,10 @@ function RowMethods:Destroy()
 		self.Capture:Disconnect()
 		self.Capture = nil
 	end
+	if ActiveTimers[self] then
+		ActiveTimers[self] = nil
+		MacUI.TimersChanged:Fire()
+	end
 	for index = #Dependencies, 1, -1 do
 		if Dependencies[index].Row == self then
 			table.remove(Dependencies, index)
@@ -2055,6 +2247,23 @@ function RowMethods:_ContextItems()
 		return items
 	end
 	local window = self.Window
+	if self.ErrorMessage then
+		table.insert(items, {
+			Text = "Show Error…",
+			Icon = "bug",
+			Callback = function()
+				self:_OpenErrorDialog()
+			end,
+		})
+		table.insert(items, {
+			Text = "Clear Error",
+			Icon = "x",
+			Callback = function()
+				self:ClearError()
+			end,
+		})
+		table.insert(items, "-")
+	end
 	if element.Default ~= nil or element._Reset then
 		table.insert(items, {
 			Text = "Reset to Default",
@@ -2066,7 +2275,7 @@ function RowMethods:_ContextItems()
 			end,
 		})
 	end
-	local text = element:GetText()
+	local text = not element.NoCopy and element:GetText() or nil
 	if text and text ~= "" then
 		local copyTitle = "Copy Value"
 		if element.Type == "Label" or element.Type == "Paragraph" or element.Type == "Code" then
@@ -2101,6 +2310,11 @@ function RowMethods:_ContextItems()
 			end,
 		})
 	end
+	if element._ContextItems then
+		for _, item in ipairs(element:_ContextItems()) do
+			table.insert(items, item)
+		end
+	end
 	if element._Activate then
 		table.insert(items, "-")
 		table.insert(items, {
@@ -2117,6 +2331,29 @@ function RowMethods:_ContextItems()
 				Icon = "x",
 				Callback = function()
 					element:SetShortcut(nil)
+				end,
+			})
+		end
+	end
+	if element.Type == "Toggle" or element.Type == "Button" then
+		local isButton = element.Type == "Button"
+		table.insert(items, "-")
+		if self.Timer then
+			table.insert(items, {
+				Text = isButton and "Stop Repeating" or "Cancel Timer",
+				Icon = "timer-off",
+				Shortcut = FormatClock(self.Timer.Ends - os.clock()),
+				Callback = function()
+					self:_CancelTimer()
+				end,
+			})
+		else
+			table.insert(items, {
+				Text = isButton and "Repeat Every…" or (element.Value and "Turn Off After…" or "Turn On After…"),
+				Icon = isButton and "repeat" or "timer",
+				Disabled = self.Disabled,
+				Callback = function()
+					self:_OpenTimerMenu()
 				end,
 			})
 		end
@@ -2139,9 +2376,11 @@ function RowMethods:_OpenContextMenu(point)
 		return
 	end
 	self.LastContext = now
+	-- kept for follow-up menus (timer durations) that open in the same place
+	self.ContextPoint = point or MousePosition()
 	local items = self:_ContextItems()
 	if #items > 0 then
-		self.Window:_OpenContextMenu(point or MousePosition(), items)
+		self.Window:_OpenContextMenu(self.ContextPoint, items)
 	end
 end
 
@@ -2188,6 +2427,305 @@ function RowMethods:_RenderShortcut()
 		Restyle(self.ShortcutCap, 0.12)
 		Restyle(self.ShortcutStroke, 0.12)
 	end
+end
+
+-- "Script.Name:12: attempt to index nil" -> "attempt to index nil", "line 12 of Name"
+local function ErrorParts(message)
+	message = tostring(message)
+	local source, line, text = message:match("^(.-):(%d+): (.+)$")
+	if not source or source == "" or source:find("\n") then
+		return message, nil
+	end
+	if source:match("^%[string ") then
+		return text, "line " .. line
+	end
+	local name = source:match("([^/\\]+)$") or source
+	if not name:match("%.luau?$") then
+		name = name:match("([^%.]+)$") or name -- Roblox paths: just the script's name
+	end
+	return text, "line " .. line .. " of " .. name
+end
+
+-- Callback errors: a red badge on the row. Hover it for the message, click it
+-- for the details (copy them, or clear the badge).
+function RowMethods:_ShowError(message, trace)
+	self.ErrorCount = (self.ErrorCount or 0) + 1
+	self.ErrorMessage = tostring(message)
+	self.ErrorTrace = trace or self.ErrorMessage
+	if self.Element then
+		self.Element.LastError = self.ErrorMessage
+	end
+	if self.ErrorBadge then
+		return
+	end
+	local badge = New("ImageButton", {
+		Name = "Error",
+		Image = MacUI:GetIcon("alert-triangle") or "",
+		Size = UDim2.fromOffset(0, 16),
+		LayoutOrder = -20,
+		Theme = { ImageColor3 = "Destructive" },
+		Parent = self.Accessory,
+	})
+	Tween(badge, { Size = UDim2.fromOffset(16, 16) }, 0.3, Enum.EasingStyle.Back)
+	badge.MouseButton1Click:Connect(function()
+		self:_OpenErrorDialog()
+	end)
+	self:_BindContext(badge)
+	self.Window:_AttachTooltip(badge, function()
+		local text = ErrorParts(self.ErrorMessage or "")
+		if #text > 200 then
+			text = text:sub(1, 197) .. "…"
+		end
+		local count = self.ErrorCount or 1
+		return text .. (count > 1 and ("  (" .. count .. " times)") or "")
+	end)
+	self.ErrorBadge = badge
+end
+
+function RowMethods:ClearError()
+	self.ErrorCount, self.ErrorMessage, self.ErrorTrace = nil, nil, nil
+	if self.Element then
+		self.Element.LastError = nil
+	end
+	if self.ErrorBadge then
+		self.ErrorBadge:Destroy()
+		self.ErrorBadge = nil
+	end
+end
+
+function RowMethods:_OpenErrorDialog()
+	if not self.ErrorMessage or self.Destroyed then
+		return
+	end
+	local window = self.Window
+	local count = self.ErrorCount or 1
+	local name = self.Title ~= "" and self.Title or "This control"
+	local text, where = ErrorParts(self.ErrorMessage)
+	local notes = {}
+	if where then
+		table.insert(notes, (where:gsub("^%l", string.upper)))
+	end
+	if count > 1 then
+		table.insert(notes, "happened " .. count .. " times")
+	end
+	window:Dialog({
+		Title = "“" .. name .. "” ran into an error",
+		Content = EscapeRich(text) .. (#notes > 0 and ("\n\n" .. EscapeRich(table.concat(notes, " · "))) or ""),
+		Icon = "bug",
+		IconColor = "Red",
+		Buttons = {
+			{
+				Title = "Copy Details",
+				Callback = function()
+					if CopyToClipboard(self.ErrorTrace or self.ErrorMessage or "") then
+						window:Toast("Copied to Clipboard", { Icon = "clipboard" })
+					else
+						window:Toast("Clipboard isn’t available", { Icon = "x-circle" })
+					end
+				end,
+			},
+			{
+				Title = "Clear Error",
+				Callback = function()
+					self:ClearError()
+				end,
+			},
+			{ Title = "Close" },
+		},
+	})
+end
+
+function RowMethods:_SetTimer(timer)
+	if self.Destroyed then
+		timer = nil
+	end
+	self.Timer = timer
+	ActiveTimers[self] = timer
+	if timer then
+		EnsureTimerLoop()
+	end
+	self:_RenderTimer()
+	MacUI.TimersChanged:Fire()
+end
+
+-- The countdown chip shown while a timer runs; click it to change or cancel.
+function RowMethods:_RenderTimer()
+	local timer = self.Timer
+	if not timer then
+		if self.TimerChip then
+			self.TimerChip:Destroy()
+			self.TimerChip = nil
+		end
+		return
+	end
+	if not self.TimerChip then
+		local chip = New("TextButton", {
+			Name = "Timer",
+			Size = UDim2.fromOffset(56, 20),
+			LayoutOrder = -15,
+			Theme = {
+				BackgroundColor3 = "Accent",
+				BackgroundTransparency = function()
+					return 0.84
+				end,
+			},
+			Parent = self.Accessory,
+		})
+		Corner(chip, 10)
+		IconImage({
+			Name = "Icon",
+			Icon = timer.Icon or "timer",
+			IconSize = 12,
+			AnchorPoint = Vector2.new(0, 0.5),
+			Position = UDim2.new(0, 7, 0.5, 0),
+			Theme = { ImageColor3 = "Accent" },
+			Parent = chip,
+		})
+		New("TextLabel", {
+			Name = "Remaining",
+			TextSize = 11,
+			Weight = Enum.FontWeight.Medium,
+			Position = UDim2.fromOffset(22, 0),
+			Size = UDim2.new(1, -28, 1, 0),
+			TextXAlignment = Enum.TextXAlignment.Center,
+			Theme = { TextColor3 = "Accent" },
+			Parent = chip,
+		})
+		chip.MouseButton1Click:Connect(function()
+			self:_OpenTimerMenu(MousePosition())
+		end)
+		self:_BindContext(chip)
+		self.Window:_AttachTooltip(chip, function()
+			local current = self.Timer
+			if not current then
+				return nil
+			end
+			if current.Interval then
+				return "Runs every " .. DescribeDuration(current.Interval) .. ". Click to change or stop."
+			end
+			return "Turns " .. (current.Value and "on" or "off") .. " when this reaches zero. Click to change or cancel."
+		end)
+		self.TimerChip = chip
+	end
+	local text = FormatClock(timer.Ends - os.clock())
+	local label = self.TimerChip:FindFirstChild("Remaining")
+	if label and label.Text ~= text then
+		label.Text = text
+		-- sized from zeros so the chip doesn't twitch as the digits change
+		local width = MeasureText((text:gsub("%d", "0")), 11, Enum.FontWeight.Medium)
+		self.TimerChip.Size = UDim2.fromOffset(math.ceil(width) + 34, 20)
+	end
+end
+
+function RowMethods:_CancelTimer()
+	local element = self.Element
+	if element and element.Type == "Button" and element.SetRepeat then
+		element:SetRepeat(nil)
+	elseif element and element.SetTimer then
+		element:SetTimer(nil)
+	else
+		self:_SetTimer(nil)
+	end
+end
+
+function RowMethods:_StartTimer(seconds, target)
+	local element = self.Element
+	if not element or self.Destroyed then
+		return
+	end
+	if element.Type == "Button" then
+		element:SetRepeat(seconds)
+		self.Window:Toast(element.Title or "Button", {
+			Detail = "every " .. DescribeDuration(seconds),
+			Icon = "repeat",
+			Highlight = true,
+		})
+	elseif element.SetTimer then
+		local timer = element:SetTimer(seconds, target)
+		if timer then
+			self.Window:Toast(element.Title or "Toggle", {
+				Detail = (timer.Value and "on" or "off") .. " in " .. DescribeDuration(seconds),
+				Icon = "timer",
+				Highlight = true,
+			})
+		end
+	end
+end
+
+-- Asks for a custom duration ("20m", "1h 30m", "45s").
+function RowMethods:_AskTimer(target)
+	local element = self.Element
+	if not element then
+		return
+	end
+	local isButton = element.Type == "Button"
+	local name = tostring(element.Title or "this")
+	self.Window:Dialog({
+		Title = isButton and ("Repeat “" .. name .. "” every")
+			or ((target and "Turn on “" or "Turn off “") .. name .. "” in"),
+		Content = isButton and "Seconds, or a time like 90s, 5m or 1h."
+			or "Minutes, or a time like 45s, 20m or 1h 30m.",
+		Icon = isButton and "repeat" or "timer",
+		Input = { Placeholder = isButton and "30s" or "20m" },
+		Buttons = {
+			{
+				Title = "Start",
+				Callback = function(text)
+					local seconds = ParseDuration(text, isButton and "s" or "m")
+					if seconds then
+						self:_StartTimer(seconds, target)
+					else
+						self.Window:Toast("Couldn’t read that time", { Icon = "x-circle" })
+					end
+				end,
+			},
+			{ Title = "Cancel" },
+		},
+	})
+end
+
+-- Durations for a toggle timer or a button repeat, opened from the context
+-- menu or the countdown chip.
+function RowMethods:_OpenTimerMenu(point)
+	local element = self.Element
+	if not element or self.Destroyed then
+		return
+	end
+	local isButton = element.Type == "Button"
+	local target = self.Timer and self.Timer.Value
+	if target == nil then
+		target = not element.Value
+	end
+	local items = {}
+	if self.Timer then
+		table.insert(items, {
+			Text = isButton and "Stop Repeating" or "Cancel Timer",
+			Icon = "timer-off",
+			Shortcut = FormatClock(self.Timer.Ends - os.clock()),
+			Callback = function()
+				self:_CancelTimer()
+			end,
+		})
+		table.insert(items, "-")
+	end
+	local verb = isButton and "Repeat Every " or (target and "Turn On in " or "Turn Off in ")
+	for _, seconds in ipairs(isButton and BUTTON_REPEAT_PRESETS or TOGGLE_TIMER_PRESETS) do
+		table.insert(items, {
+			Text = verb .. DescribeDuration(seconds, true),
+			Callback = function()
+				self:_StartTimer(seconds, target)
+			end,
+		})
+	end
+	table.insert(items, "-")
+	table.insert(items, {
+		Text = "Custom…",
+		Icon = isButton and "repeat" or "timer",
+		Callback = function()
+			self:_AskTimer(target)
+		end,
+	})
+	self.Window:_OpenContextMenu(point or self.ContextPoint or MousePosition(), items)
 end
 
 --------------------------------------------------------------------------------
@@ -2245,9 +2783,9 @@ function ElementBase:OnChanged(fn)
 end
 
 function ElementBase:_Emit(...)
-	Spawn(self.Callback, ...)
+	RunCallback(self, self.Callback, ...)
 	for _, fn in ipairs(self._listeners) do
-		Spawn(fn, ...)
+		RunCallback(self, fn, ...)
 	end
 	if self.Idx ~= nil then
 		MacUI.OptionChanged:Fire(self.Idx, self.Value, self)
@@ -2337,6 +2875,11 @@ function ElementBase:RecordShortcut()
 	end, true)
 end
 
+-- Removes the error badge left by a failed callback.
+function ElementBase:ClearError()
+	self.Row:ClearError()
+end
+
 function ElementBase:Destroy()
 	self.Row:Destroy()
 	if self.Idx ~= nil and MacUI.Options[self.Idx] == self then
@@ -2364,6 +2907,23 @@ local UNDOABLE = {
 }
 local History = { Undo = {}, Redo = {}, Busy = false, LastInput = -1, Limit = 100 }
 local Snapshots = setmetatable({}, { __mode = "k" })
+
+-- Timers and macros change things through AutomationApply: not undoable, and
+-- not recorded into a macro.
+local Automation = { Depth = 0 }
+-- The macro that is recording right now, if any.
+local Macros = { Recorder = nil }
+local function AutomationApply(fn, ...)
+	Automation.Depth += 1
+	local busy = History.Busy
+	History.Busy = true
+	local ok, err = pcall(fn, ...)
+	History.Busy = busy
+	Automation.Depth -= 1
+	if not ok then
+		warn("[MacUI] " .. tostring(err))
+	end
+end
 
 local function Snapshot(element)
 	if element.Type == "Colorpicker" then
@@ -2442,6 +3002,108 @@ MacUI.OptionChanged:Connect(function(_, _, element)
 		return
 	end
 	RecordChange(element, before, after)
+end)
+
+--------------------------------------------------------------------------------
+-- Usage: what the user reaches for, so Spotlight can suggest it ("frecency":
+-- how often, weighted by how recently)
+--------------------------------------------------------------------------------
+
+-- Fires (a couple of seconds after a change) when usage changes; InterfaceManager saves it.
+MacUI.UsageChanged = Signal.new()
+local Usage = {}
+local usageQueued = false
+
+local function UsageKey(element)
+	if element.Idx ~= nil then
+		return "o:" .. tostring(element.Idx)
+	end
+	local tab = element.Row and element.Row.Tab
+	return "p:" .. (tab and tab.Title or "") .. "/" .. tostring(element.Title or "")
+end
+
+local function NoteUsage(key)
+	if not key then
+		return
+	end
+	local entry = Usage[key]
+	local now = os.clock()
+	if entry and entry.Clock and now - entry.Clock < 2 then
+		return -- a drag or a burst of typing counts once
+	end
+	if not entry then
+		entry = { Count = 0, Last = 0 }
+		Usage[key] = entry
+	end
+	entry.Count += 1
+	entry.Last = os.time()
+	entry.Clock = now
+	if not usageQueued then
+		usageQueued = true
+		task.delay(2, function()
+			usageQueued = false
+			if not MacUI.Unloaded then
+				MacUI.UsageChanged:Fire()
+			end
+		end)
+	end
+end
+
+local function Frecency(key)
+	local entry = key and Usage[key]
+	if not entry then
+		return 0
+	end
+	local age = os.time() - (entry.Last or 0)
+	local weight = age < 3600 and 4 or age < 86400 and 2 or age < 604800 and 1 or 0.5
+	return entry.Count * weight
+end
+
+MacUI.OptionChanged:Connect(function(_, _, element)
+	if type(element) == "table" and UNDOABLE[element.Type] and Automation.Depth == 0 and UserActive() then
+		NoteUsage(UsageKey(element))
+	end
+end)
+
+-- Usage as a plain table (to save); SetUsage merges a saved one back in.
+function MacUI:GetUsage()
+	local copy = {}
+	for key, entry in pairs(Usage) do
+		copy[key] = { c = entry.Count, t = entry.Last }
+	end
+	return copy
+end
+
+function MacUI:SetUsage(data)
+	if type(data) ~= "table" then
+		return
+	end
+	for key, entry in pairs(data) do
+		local count = type(entry) == "table" and tonumber(entry.c)
+		if type(key) == "string" and count then
+			local current = Usage[key]
+			if not current or current.Count < count then
+				Usage[key] = { Count = count, Last = tonumber(entry.t) or 0, Clock = current and current.Clock }
+			end
+		end
+	end
+end
+
+function MacUI:ClearUsage()
+	table.clear(Usage)
+	self.UsageChanged:Fire()
+end
+
+-- Macro recording: the user's own changes to indexed controls.
+MacUI.OptionChanged:Connect(function(_, _, element)
+	local recorder = Macros.Recorder
+	if not recorder or type(element) ~= "table" or not UNDOABLE[element.Type] then
+		return
+	end
+	if Automation.Depth > 0 or not UserActive() then
+		return
+	end
+	recorder:_Capture(element, Snapshot(element))
 end)
 
 local function ReplayHistory(fromStack, toStack, field, verb, icon)
@@ -2744,7 +3406,13 @@ function Container:AddButton(info, callback)
 		if row.Disabled then
 			return
 		end
-		Spawn(Button.Callback)
+		if Automation.Depth == 0 then
+			if Macros.Recorder then
+				Macros.Recorder:_CaptureButton(Button)
+			end
+			NoteUsage(UsageKey(Button))
+		end
+		RunCallback(Button, Button.Callback)
 	end
 
 	function Button:_Activate(announce)
@@ -2777,6 +3445,30 @@ function Container:AddButton(info, callback)
 	end
 	function Button:Fire()
 		Fire()
+	end
+	-- Presses the button every `seconds` until SetRepeat(nil). The row shows a
+	-- countdown to the next press.
+	function Button:SetRepeat(seconds)
+		seconds = tonumber(seconds)
+		if not seconds or seconds <= 0 then
+			self.RepeatInterval = nil
+			row:_SetTimer(nil)
+			return nil
+		end
+		seconds = math.max(seconds, 1)
+		self.RepeatInterval = seconds
+		local timer = { Ends = os.clock() + seconds, Interval = seconds, Icon = "repeat", Runs = 0 }
+		function timer.Fire()
+			-- from the time it was due, so the interval doesn't drift
+			timer.Ends += seconds
+			if timer.Ends <= os.clock() then
+				timer.Ends = os.clock() + seconds -- fell far behind (the game froze)
+			end
+			timer.Runs += 1
+			AutomationApply(Fire)
+		end
+		row:_SetTimer(timer)
+		return timer
 	end
 	if info.Shortcut then
 		Button:SetShortcut(info.Shortcut)
@@ -2871,6 +3563,9 @@ function Container:AddToggle(idx, info)
 	function Toggle:SetValue(value)
 		value = value == true
 		self.Value = value
+		if row.Timer and row.Timer.Value == value then
+			row:_SetTimer(nil) -- already where the timer was taking it
+		end
 		Render(0.25)
 		self:_Emit(value)
 		ShortcutsChanged:Fire()
@@ -2892,6 +3587,43 @@ function Container:AddToggle(idx, info)
 				Highlight = self.Value,
 			})
 		end
+	end
+
+	-- Flips the toggle after `seconds` (to `value`, or the opposite of what it
+	-- is now); SetTimer(nil) cancels. The row shows a countdown meanwhile.
+	function Toggle:SetTimer(seconds, value)
+		seconds = tonumber(seconds)
+		if value == nil then
+			value = not self.Value
+		end
+		value = value == true
+		if not seconds or seconds <= 0 or value == self.Value then
+			row:_SetTimer(nil)
+			return nil
+		end
+		local timer = { Ends = os.clock() + seconds, Duration = seconds, Value = value, Icon = "timer" }
+		function timer.Fire()
+			row:_SetTimer(nil)
+			AutomationApply(function()
+				Toggle:SetValue(value)
+			end)
+			MacUI:Notify({
+				Title = tostring(Toggle.Title or "Timer"),
+				Content = (value and "Turned on" or "Turned off") .. " by its timer.",
+				Icon = "timer",
+				Duration = 5,
+			})
+		end
+		row:_SetTimer(timer)
+		return timer
+	end
+	-- Seconds left and the value it will switch to, or nil.
+	function Toggle:GetTimer()
+		local timer = row.Timer
+		if timer then
+			return math.max(timer.Ends - os.clock(), 0), timer.Value
+		end
+		return nil
 	end
 
 	row.OnClick = function()
@@ -3565,9 +4297,9 @@ function Container:AddKeybind(idx, info)
 		self.Value = key and tostring(key) or "None"
 		self.Mode = mode or self.Mode
 		Render()
-		Spawn(self.ChangedCallback, self.Value)
+		RunCallback(self, self.ChangedCallback, self.Value)
 		for _, fn in ipairs(self._listeners) do
-			Spawn(fn, self.Value)
+			RunCallback(self, fn, self.Value)
 		end
 		ShortcutsChanged:Fire()
 		if self.Idx ~= nil then
@@ -3580,7 +4312,7 @@ function Container:AddKeybind(idx, info)
 	end
 
 	function Keybind:DoClick()
-		Spawn(self.Callback, self.Toggled)
+		RunCallback(self, self.Callback, self.Toggled)
 		clicked:Fire(self.Toggled)
 		ShortcutsChanged:Fire()
 	end
@@ -3644,7 +4376,7 @@ function Container:AddKeybind(idx, info)
 		if holding and Matches(input) then
 			holding = false
 			Keybind.Toggled = false
-			Spawn(Keybind.Callback, false)
+			RunCallback(Keybind, Keybind.Callback, false)
 			clicked:Fire(false)
 			ShortcutsChanged:Fire()
 		end
@@ -5100,6 +5832,518 @@ function Container:AddTable(idx, info)
 end
 Container.AddList = Container.AddTable
 
+-- Macro steps are saved by index (or "Page/Title" for controls without one).
+local function MacroKey(element)
+	if element.Idx ~= nil then
+		return { i = element.Idx }
+	end
+	local tab = element.Row and element.Row.Tab
+	return { p = (tab and tab.Title or "") .. "/" .. tostring(element.Title or "") }
+end
+
+local function FindMacroTarget(step)
+	if step.i ~= nil then
+		return MacUI.Options[step.i]
+	end
+	local tabTitle, title = tostring(step.p or ""):match("^(.-)/(.*)$")
+	if not tabTitle then
+		return nil
+	end
+	for _, window in ipairs(MacUI.Windows) do
+		for _, tab in ipairs(window.Tabs or {}) do
+			if tab.Title == tabTitle then
+				for _, row in ipairs(tab.Rows) do
+					if row.Element and tostring(row.Element.Title or "") == title then
+						return row.Element
+					end
+				end
+			end
+		end
+	end
+	return nil
+end
+
+local function EncodeSnapshot(element, snapshot)
+	if element.Type == "Colorpicker" then
+		return { color = snapshot.Color:ToHex(), alpha = snapshot.Transparency }
+	elseif element.Type == "Keybind" then
+		return { key = snapshot.Key, mode = snapshot.Mode }
+	end
+	return snapshot -- a boolean, number, string or list (multi-select)
+end
+
+local function DecodeSnapshot(element, value)
+	if element.Type == "Colorpicker" then
+		local ok, color = pcall(Color3.fromHex, tostring(type(value) == "table" and value.color or ""))
+		return ok and { Color = color, Transparency = value.alpha } or nil
+	elseif element.Type == "Keybind" then
+		return type(value) == "table" and { Key = value.key, Mode = value.mode } or nil
+	end
+	return value
+end
+
+--[[
+	Records what the user changes and presses, then plays it back with the
+	same timing, once or on a loop.
+
+	local Routine = Section:AddMacro("Routine", { Title = "Farming routine", Loop = false, Speed = 1 })
+	Routine:Record()  Routine:StopRecording()  Routine:Play()  Routine:Stop()
+	Routine:SetLoop(true)  Routine:SetSpeed(2)  Routine:Clear()
+	Routine:Export() -> table   Routine:Import(table)   (SaveManager saves it)
+]]
+function Container:AddMacro(idx, info)
+	idx, info = ParseArgs(idx, info)
+	local row = CreateRow(self, info)
+	local Macro = NewElement("Macro", row, info)
+	Macro.Steps = {}
+	Macro.Value = 0
+	Macro.Loop = info.Loop == true
+	Macro.Speed = math.clamp(tonumber(info.Speed) or 1, 0.1, 10)
+	Macro.Recording = false
+	Macro.Playing = false
+	Macro.NoCopy = true
+	local baseDescription = info.Description and tostring(info.Description) or nil
+	local playToken = 0
+
+	local function RoundButton(order)
+		local state = { Hovered = false }
+		local button = New("TextButton", {
+			Name = "MacroButton",
+			Size = UDim2.fromOffset(26, 26),
+			LayoutOrder = order,
+			Theme = {
+				BackgroundColor3 = function(t)
+					return state.Hovered and t.ButtonHover or t.Button
+				end,
+			},
+			Parent = row.Accessory,
+		})
+		Corner(button, 13)
+		Stroke(button, "ControlStroke", 1, 0.35)
+		button.MouseEnter:Connect(function()
+			state.Hovered = true
+			Restyle(button, 0.12)
+		end)
+		button.MouseLeave:Connect(function()
+			state.Hovered = false
+			Restyle(button, 0.18)
+		end)
+		row:_BindContext(button)
+		return button
+	end
+
+	local recordButton = RoundButton(1)
+	recordButton.Name = "Record"
+	local recordDot = New("Frame", {
+		Name = "Dot",
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromOffset(10, 10),
+		Theme = { BackgroundColor3 = "Destructive" },
+		Parent = recordButton,
+	})
+	local recordCorner = Corner(recordDot, 5)
+	local playButton = RoundButton(2)
+	playButton.Name = "Play"
+	local playIcon = IconImage({
+		Name = "Icon",
+		Icon = "play",
+		IconSize = 12,
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.new(0.5, 1, 0.5, 0),
+		Theme = {
+			ImageColor3 = function(t)
+				return #Macro.Steps > 0 and t.Text or t.Tertiary
+			end,
+		},
+		Parent = playButton,
+	})
+	local stopSquare = New("Frame", {
+		Name = "Stop",
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.fromOffset(9, 9),
+		Visible = false,
+		Theme = { BackgroundColor3 = "Text" },
+		Parent = playButton,
+	})
+	Corner(stopSquare, 2)
+	row.Window:_AttachTooltip(recordButton, function()
+		return Macro.Recording and "Stop recording" or "Record"
+	end)
+	row.Window:_AttachTooltip(playButton, function()
+		return Macro.Playing and "Stop" or (#Macro.Steps > 0 and "Play" or "Record something first")
+	end)
+
+	local function Render()
+		recordCorner.CornerRadius = UDim.new(0, Macro.Recording and 2 or 5)
+		Tween(recordDot, { Size = Macro.Recording and UDim2.fromOffset(9, 9) or UDim2.fromOffset(10, 10) }, 0.15)
+		playIcon.Visible = not Macro.Playing
+		stopSquare.Visible = Macro.Playing
+		Restyle(playIcon, 0.15)
+	end
+
+	local function Plural(count, word)
+		return count .. " " .. word .. (count == 1 and "" or "s")
+	end
+
+	local function UpdateStatus()
+		local text
+		if Macro.Recording then
+			text = "Recording: change settings or press buttons. " .. Plural(#(Macro._pending or {}), "step") .. " so far."
+		elseif Macro.Playing then
+			text = ("Playing step %d of %d"):format(Macro.Position or 1, #Macro.Steps)
+				.. ((Macro.Run or 1) > 1 and (" · run " .. Macro.Run) or "")
+		elseif #Macro.Steps > 0 then
+			text = Plural(#Macro.Steps, "step") .. " · " .. DescribeDuration(math.max(Macro:GetDuration(), 1))
+				.. (Macro.Loop and " · loops" or "")
+		else
+			text = baseDescription or "Press record, change some settings, then stop. Play repeats them."
+		end
+		row:SetDesc(text)
+	end
+
+	local function SetState(state)
+		RunCallback(Macro, info.Callback, state)
+	end
+
+	local function Changed()
+		Macro.Value = #Macro.Steps
+		if Macro.Idx ~= nil then
+			MacUI.OptionChanged:Fire(Macro.Idx, Macro.Value, Macro)
+		end
+	end
+
+	function Macro:GetDuration()
+		local total = 0
+		for _, step in ipairs(self.Steps) do
+			total += step.Delay
+		end
+		return total
+	end
+
+	function Macro:Record()
+		if self.Recording or row.Destroyed then
+			return
+		end
+		if self.Playing then
+			self:Stop()
+		end
+		if Macros.Recorder and Macros.Recorder ~= self then
+			Macros.Recorder:StopRecording()
+		end
+		self.Recording = true
+		self._pending = {}
+		self._last = os.clock()
+		Macros.Recorder = self
+		row.Window:_SetRecording(self)
+		Render()
+		UpdateStatus()
+		SetState("Recording")
+	end
+
+	function Macro:_Capture(element, snapshot)
+		if element == self or element.Type == "Macro" or not self.Recording then
+			return
+		end
+		local now = os.clock()
+		local steps = self._pending
+		local last = steps[#steps]
+		if last and last.Element == element and not last.Button and now - self._last < 0.4 then
+			last.Snapshot = snapshot -- a drag or quick typing: keep where it ended
+		else
+			table.insert(steps, { Delay = now - self._last, Element = element, Snapshot = snapshot })
+		end
+		self._last = now
+		row.Window:_SetRecording(self)
+		UpdateStatus()
+	end
+
+	function Macro:_CaptureButton(button)
+		if not self.Recording then
+			return
+		end
+		local now = os.clock()
+		table.insert(self._pending, { Delay = now - self._last, Element = button, Button = true })
+		self._last = now
+		row.Window:_SetRecording(self)
+		UpdateStatus()
+	end
+
+	function Macro:StopRecording()
+		if not self.Recording then
+			return
+		end
+		self.Recording = false
+		if Macros.Recorder == self then
+			Macros.Recorder = nil
+		end
+		row.Window:_SetRecording(nil)
+		local steps = self._pending or {}
+		self._pending = nil
+		if #steps > 0 then
+			-- the pause before the first change isn't part of the routine
+			steps[1].Delay = math.min(steps[1].Delay, 0.3)
+			self.Steps = steps
+			Changed()
+		elseif not row.Destroyed then
+			row.Window:Toast("Nothing recorded", { Detail = "change a setting while recording", Icon = "circle-dot" })
+		end
+		Render()
+		UpdateStatus()
+		SetState("Idle")
+	end
+
+	local function ApplyStep(step)
+		local element = step.Element
+		if not element or (element.Row and element.Row.Destroyed) then
+			return
+		end
+		if step.Button then
+			AutomationApply(element.Fire, element)
+		elseif step.Snapshot ~= nil then
+			AutomationApply(RestoreSnapshot, element, step.Snapshot)
+		end
+	end
+
+	-- Plays the recording; options { Loop, Speed } override the macro's own.
+	function Macro:Play(options)
+		if self.Recording then
+			self:StopRecording()
+		end
+		if self.Playing or #self.Steps == 0 or row.Destroyed then
+			return false
+		end
+		options = options or {}
+		local loop = options.Loop
+		if loop == nil then
+			loop = self.Loop
+		end
+		local speed = math.clamp(tonumber(options.Speed) or self.Speed, 0.1, 10)
+		self.Playing = true
+		self.Run = 1
+		self.Position = 1
+		playToken += 1
+		local token = playToken
+		local steps = self.Steps
+		task.spawn(function()
+			local run = 0
+			repeat
+				run += 1
+				self.Run = run
+				for index, step in ipairs(steps) do
+					self.Position = index
+					UpdateStatus()
+					if step.Delay > 0 then
+						task.wait(step.Delay / speed)
+					end
+					if token ~= playToken or MacUI.Unloaded or row.Destroyed then
+						return
+					end
+					ApplyStep(step)
+				end
+				-- always yield between runs, even for a recording with no pauses
+				task.wait(math.max(0.25 / speed, 0.03))
+			until not loop or token ~= playToken or MacUI.Unloaded or row.Destroyed
+			if token == playToken and not row.Destroyed then
+				self.Playing = false
+				Render()
+				UpdateStatus()
+				SetState("Idle")
+			end
+		end)
+		Render()
+		SetState("Playing")
+		return true
+	end
+
+	-- Stops recording or playback.
+	function Macro:Stop()
+		if self.Recording then
+			self:StopRecording()
+			return
+		end
+		if self.Playing then
+			playToken += 1
+			self.Playing = false
+			Render()
+			UpdateStatus()
+			SetState("Idle")
+		end
+	end
+
+	function Macro:Clear()
+		self:Stop()
+		self.Steps = {}
+		Changed()
+		Render()
+		UpdateStatus()
+	end
+
+	function Macro:SetLoop(loop)
+		self.Loop = loop == true
+		UpdateStatus()
+		Changed()
+	end
+
+	function Macro:SetSpeed(speed)
+		self.Speed = math.clamp(tonumber(speed) or 1, 0.1, 10)
+		Changed()
+	end
+
+	-- A plain table (JSON-safe) with the steps, loop and speed.
+	function Macro:Export()
+		local steps = {}
+		for _, step in ipairs(self.Steps) do
+			local element = step.Element
+			if element and not (element.Row and element.Row.Destroyed) then
+				local entry = MacroKey(element)
+				entry.d = math.floor(step.Delay * 1000 + 0.5) / 1000
+				if step.Button then
+					entry.b = true
+				else
+					entry.v = EncodeSnapshot(element, step.Snapshot)
+				end
+				table.insert(steps, entry)
+			end
+		end
+		return { v = 1, loop = self.Loop, speed = self.Speed, steps = steps }
+	end
+
+	-- Loads steps from Export(). Steps whose control no longer exists are skipped.
+	function Macro:Import(data)
+		if type(data) ~= "table" or type(data.steps) ~= "table" then
+			return false
+		end
+		self:Stop()
+		local steps = {}
+		for _, entry in ipairs(data.steps) do
+			local element = type(entry) == "table" and FindMacroTarget(entry)
+			if element then
+				local step = { Delay = math.max(tonumber(entry.d) or 0, 0), Element = element }
+				if entry.b then
+					step.Button = element.Type == "Button"
+				else
+					step.Snapshot = DecodeSnapshot(element, entry.v)
+				end
+				if step.Button or step.Snapshot ~= nil then
+					table.insert(steps, step)
+				end
+			end
+		end
+		self.Steps = steps
+		if data.loop ~= nil then
+			self.Loop = data.loop == true
+		end
+		if tonumber(data.speed) then
+			self.Speed = math.clamp(tonumber(data.speed), 0.1, 10)
+		end
+		Changed()
+		Render()
+		UpdateStatus()
+		return true
+	end
+
+	function Macro:_Text()
+		if self.Recording then
+			return "Recording"
+		elseif self.Playing then
+			return "Playing"
+		end
+		return #self.Steps > 0 and Plural(#self.Steps, "step") or nil
+	end
+
+	-- Spotlight and keyboard shortcuts: play, or stop whatever is running.
+	function Macro:_Activate(announce)
+		if row.Disabled then
+			return
+		end
+		NoteUsage(UsageKey(self))
+		local window = row.Window
+		if self.Recording then
+			self:StopRecording()
+		elseif self.Playing then
+			self:Stop()
+			if announce then
+				window:Toast(self.Title or "Macro", { Detail = "Stopped", Icon = "square" })
+			end
+		elseif #self.Steps > 0 then
+			self:Play()
+			if announce then
+				window:Toast(self.Title or "Macro", { Detail = "Playing", Icon = "play", Highlight = true })
+			end
+		else
+			window:Toast("Nothing recorded yet", { Icon = "circle-dot" })
+		end
+	end
+
+	function Macro:_ContextItems()
+		return {
+			"-",
+			{
+				Text = self.Recording and "Stop Recording" or (#self.Steps > 0 and "Record Again" or "Record"),
+				Icon = "circle-dot",
+				Disabled = row.Disabled,
+				Callback = function()
+					if self.Recording then
+						self:StopRecording()
+					else
+						self:Record()
+					end
+				end,
+			},
+			{
+				Text = self.Loop and "Stop Looping" or "Loop Playback",
+				Icon = "repeat",
+				Callback = function()
+					self:SetLoop(not self.Loop)
+				end,
+			},
+			{
+				Text = "Clear Recording",
+				Icon = "trash-2",
+				Destructive = true,
+				Disabled = #self.Steps == 0 or self.Recording,
+				Callback = function()
+					self:Clear()
+				end,
+			},
+		}
+	end
+
+	recordButton.MouseButton1Click:Connect(function()
+		if row.Disabled then
+			return
+		end
+		if Macro.Recording then
+			Macro:StopRecording()
+		else
+			Macro:Record()
+		end
+	end)
+	playButton.MouseButton1Click:Connect(function()
+		if row.Disabled then
+			return
+		end
+		if Macro.Playing then
+			Macro:Stop()
+		elseif #Macro.Steps > 0 then
+			NoteUsage(UsageKey(Macro))
+			Macro:Play()
+		else
+			row.Window:Toast("Nothing recorded yet", { Detail = "press record first", Icon = "circle-dot" })
+		end
+	end)
+
+	Render()
+	UpdateStatus()
+	Register(idx, Macro)
+	if info.Shortcut then
+		Macro:SetShortcut(info.Shortcut)
+	end
+	return Macro
+end
+
 --------------------------------------------------------------------------------
 -- Groups, sections and tabs
 --------------------------------------------------------------------------------
@@ -5479,6 +6723,105 @@ end
 --------------------------------------------------------------------------------
 -- Window
 --------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+-- Performance guard: when the game's frame rate drops, pause the heavy effects
+-- (frosted glass, animations) until it recovers
+--------------------------------------------------------------------------------
+
+local function EngageGuard()
+	if Guard.Engaged then
+		return
+	end
+	Guard.Engaged = true
+	Guard.Saved = { ReduceMotion = MacUI.ReduceMotion, Acrylic = {} }
+	MacUI.ReduceMotion = true
+	Guard.Applying = true
+	for _, window in ipairs(MacUI.Windows) do
+		if window.Acrylic and window.SetAcrylic then
+			Guard.Saved.Acrylic[window] = true
+			window:SetAcrylic(false)
+		end
+	end
+	Guard.Applying = false
+	MacUI.EffectsPaused = true
+	if Guard.Notify then
+		MacUI:Notify({
+			Title = "Effects paused",
+			Content = "The game slowed down, so blur and animations are off until it speeds up again.",
+			Icon = "gauge",
+			IconColor = "Orange",
+			Duration = 5,
+		})
+	end
+	MacUI.PerformanceChanged:Fire(true)
+end
+
+local function ReleaseGuard()
+	if not Guard.Engaged then
+		return
+	end
+	local saved = Guard.Saved or {}
+	Guard.Engaged = false
+	Guard.Saved = nil
+	MacUI.ReduceMotion = saved.ReduceMotion == true
+	Guard.Applying = true
+	for window in pairs(saved.Acrylic or {}) do
+		if not MacUI.Unloaded and window.SetAcrylic then
+			window:SetAcrylic(true)
+		end
+	end
+	Guard.Applying = false
+	MacUI.EffectsPaused = false
+	MacUI.PerformanceChanged:Fire(false)
+end
+
+--[[
+	MacUI:SetPerformanceGuard(true)                            -- watch the frame rate
+	MacUI:SetPerformanceGuard({ MinFps = 30, Notify = true })  -- below 30 fps for 3 s: pause effects
+	MacUI:SetPerformanceGuard(false)
+	MacUI.EffectsPaused, MacUI.Fps, MacUI.PerformanceChanged:Connect(function(paused) end)
+]]
+function MacUI:SetPerformanceGuard(options)
+	if Guard.Connection then
+		Guard.Connection:Disconnect()
+		Guard.Connection = nil
+	end
+	if not options or self.Unloaded then
+		Guard.Enabled = false
+		self.PerformanceGuard = false
+		ReleaseGuard()
+		return
+	end
+	options = type(options) == "table" and options or {}
+	Guard.Enabled = true
+	self.PerformanceGuard = true
+	Guard.MinFps = math.max(tonumber(options.MinFps) or 30, 1)
+	Guard.Notify = options.Notify ~= false
+	local frames, elapsed, slow, fast = 0, 0, 0, 0
+	Guard.Connection = RunService.Heartbeat:Connect(function(dt)
+		frames += 1
+		elapsed += dt
+		if elapsed < 1 then
+			return
+		end
+		local fps = frames / elapsed
+		frames, elapsed = 0, 0
+		MacUI.Fps = fps
+		if fps < Guard.MinFps then
+			slow, fast = slow + 1, 0
+			if slow >= 3 then
+				EngageGuard()
+			end
+		else
+			slow = 0
+			fast = fps >= Guard.MinFps + 8 and fast + 1 or 0
+			if fast >= 8 then
+				ReleaseGuard()
+			end
+		end
+	end)
+end
 
 local function SizeFromConfig(value, fallback)
 	if typeof(value) == "UDim2" then
@@ -6723,6 +8066,105 @@ function MacUI:CreateWindow(config)
 		end)
 	end
 
+	-- A pill under the toolbar while a macro records, with a Stop button: the
+	-- macro's own row may be on another page.
+	local RecordingPill
+	function Window:_SetRecording(macro)
+		if not macro then
+			local pill = RecordingPill
+			RecordingPill = nil
+			if pill then
+				pill.Shown = false
+				Tween(pill.Body, { GroupTransparency = 1 }, 0.2)
+				Restyle(pill.Shadow, 0.2)
+				task.delay(0.21, function()
+					pill.Holder:Destroy()
+				end)
+			end
+			return
+		end
+		if not RecordingPill then
+			local pill = { Shown = true, Macro = macro }
+			pill.Holder = New("Frame", {
+				Name = "Recording",
+				BackgroundTransparency = 1,
+				AnchorPoint = Vector2.new(0.5, 0),
+				Position = UDim2.new(0.5, 0, 0, toolbarHeight + 8),
+				Size = UDim2.fromOffset(220, 32),
+				ZIndex = 30,
+				Parent = Main,
+			})
+			pill.Shadow = Shadow(pill.Holder, 4, function(t)
+				return pill.Shown and math.min(t.ShadowTransparency + 0.15, 1) or 1
+			end)
+			pill.Body = New("CanvasGroup", {
+				Name = "Body",
+				Size = UDim2.fromScale(1, 1),
+				GroupTransparency = 1,
+				ZIndex = 2,
+				Theme = { BackgroundColor3 = "Menu" },
+				Parent = pill.Holder,
+			})
+			Corner(pill.Body, 16)
+			local border = New("Frame", {
+				BackgroundTransparency = 1,
+				Position = UDim2.fromOffset(1, 1),
+				Size = UDim2.new(1, -2, 1, -2),
+				ZIndex = 5,
+				Parent = pill.Body,
+			})
+			Corner(border, 15)
+			Stroke(border, "MenuStroke", 1, 0.15)
+			pill.Dot = New("Frame", {
+				Name = "Dot",
+				AnchorPoint = Vector2.new(0, 0.5),
+				Position = UDim2.new(0, 13, 0.5, 0),
+				Size = UDim2.fromOffset(9, 9),
+				Theme = { BackgroundColor3 = "Destructive" },
+				Parent = pill.Body,
+			})
+			Corner(pill.Dot, 5)
+			pill.Label = New("TextLabel", {
+				Name = "Text",
+				TextSize = 13,
+				Weight = Enum.FontWeight.Medium,
+				Position = UDim2.fromOffset(30, 0),
+				Size = UDim2.new(1, -90, 1, 0),
+				TextTruncate = Enum.TextTruncate.AtEnd,
+				Theme = { TextColor3 = "Text" },
+				Parent = pill.Body,
+			})
+			local stop = PushButton(pill.Body, "Stop", "Destructive", 22)
+			stop.Instance.AnchorPoint = Vector2.new(1, 0.5)
+			stop.Instance.Position = UDim2.new(1, -5, 0.5, 0)
+			stop.Instance.MouseButton1Click:Connect(function()
+				if pill.Macro and pill.Macro.StopRecording then
+					pill.Macro:StopRecording()
+				end
+			end)
+			pill.StopWidth = stop.Instance.Size.X.Offset
+			Tween(pill.Body, { GroupTransparency = 0 }, 0.2)
+			Restyle(pill.Shadow, 0.2)
+			-- the dot breathes while recording
+			task.spawn(function()
+				while pill.Shown and not MacUI.Unloaded do
+					Tween(pill.Dot, { BackgroundTransparency = 0.6 }, 0.6, Enum.EasingStyle.Sine)
+					task.wait(0.6)
+					Tween(pill.Dot, { BackgroundTransparency = 0 }, 0.6, Enum.EasingStyle.Sine)
+					task.wait(0.6)
+				end
+			end)
+			RecordingPill = pill
+		end
+		local pill = RecordingPill
+		pill.Macro = macro
+		local count = #(macro._pending or {})
+		local text = "Recording “" .. tostring(macro.Title or "Macro") .. "” · " .. count .. (count == 1 and " step" or " steps")
+		pill.Label.Text = text
+		local width = math.ceil(MeasureText(text, 13, Enum.FontWeight.Medium)) + 30 + 14 + pill.StopWidth
+		pill.Holder.Size = UDim2.fromOffset(math.clamp(width, 180, 420), 32)
+	end
+
 	-- A short-lived HUD at the bottom of the screen ("Auto Farm  On").
 	local ActiveToast
 	function Window:Toast(text, options)
@@ -7585,6 +9027,9 @@ function MacUI:CreateWindow(config)
 	end
 
 	function Window:SetAcrylic(enabled)
+		if Guard.Engaged and not Guard.Applying and Guard.Saved then
+			Guard.Saved.Acrylic[Window] = (enabled == true) or nil
+		end
 		enabled = enabled == true and AcrylicSupported()
 		Window.Acrylic = enabled
 		Restyle(SidebarGlass, 0.25)
@@ -7888,6 +9333,8 @@ function MacUI:CreateWindow(config)
 	local function EntryValue(entry)
 		if entry.Kind == "Tab" then
 			return "Open"
+		elseif entry.Kind == "Action" then
+			return entry.ValueText
 		elseif entry.Kind == "Command" then
 			return entry.Command.Shortcut and KeyName(entry.Command.Shortcut) or "Run"
 		end
@@ -7898,9 +9345,15 @@ function MacUI:CreateWindow(config)
 			if entry.Row.Disabled then
 				return nil
 			end
+			if entry.Row.Timer then
+				return "Run · " .. FormatClock(entry.Row.Timer.Ends - os.clock())
+			end
 			return "Run"
 		end
 		local ok, text = pcall(element.GetText, element)
+		if entry.Row.Timer then
+			return (ok and text and (text .. " · ") or "") .. FormatClock(entry.Row.Timer.Ends - os.clock())
+		end
 		return ok and text or nil
 	end
 
@@ -7928,6 +9381,7 @@ function MacUI:CreateWindow(config)
 						Order = 5000 + index,
 						Icon = command.Icon,
 						TileColor = command.TileColor,
+						UsageKey = "c:" .. command.Title,
 					})
 				end
 			end
@@ -7944,6 +9398,7 @@ function MacUI:CreateWindow(config)
 						TitleLower = row.Title:lower(),
 						Search = (row.Description .. " " .. row.Keywords .. " " .. tab.Title .. " " .. (section or "")):lower(),
 						Order = tabIndex * 10000 + rowIndex,
+						UsageKey = row.Element and UsageKey(row.Element) or nil,
 					})
 				end
 			end
@@ -7981,38 +9436,539 @@ function MacUI:CreateWindow(config)
 		return 0
 	end
 
-	local function SpotlightSearch(text)
-		local query = text:lower():gsub("^%s+", ""):gsub("%s+$", "")
-		local results = {}
-		for _, entry in ipairs(CollectEntries()) do
-			if query == "" then
-				if entry.Kind == "Tab" or entry.Kind == "Command" then
-					entry.Score = 1
-					table.insert(results, entry)
-				end
-			else
-				local score = Score(entry, query)
-				if score > 0 then
-					entry.Score = score
-					table.insert(results, entry)
+	----------------------------------------------------------------------------
+	-- Spotlight actions: type what you want done. "walk speed 50", "auto farm
+	-- off", "difficulty hard", "fill red", "name = Bob", "auto farm off in 30m",
+	-- "collect every 10s", "reset fov", "play routine", "light mode", "undo"
+	----------------------------------------------------------------------------
+
+	local ON_WORDS = { on = true, enable = true, enabled = true, yes = true, ["true"] = true }
+	local OFF_WORDS = { off = true, disable = true, disabled = true, no = true, ["false"] = true }
+	local COLOR_WORDS = {
+		red = rgb(255, 69, 58),
+		orange = rgb(255, 159, 10),
+		yellow = rgb(255, 214, 10),
+		green = rgb(48, 209, 88),
+		mint = rgb(99, 230, 226),
+		teal = rgb(64, 200, 224),
+		cyan = rgb(100, 210, 255),
+		blue = rgb(10, 132, 255),
+		indigo = rgb(94, 92, 230),
+		purple = rgb(191, 90, 242),
+		pink = rgb(255, 55, 95),
+		brown = rgb(172, 142, 104),
+		white = rgb(255, 255, 255),
+		black = rgb(0, 0, 0),
+		gray = rgb(142, 142, 147),
+		grey = rgb(142, 142, 147),
+	}
+	-- checked in order: "turn on " before "turn "
+	local ACTION_VERBS = {
+		{ "turn on ", "on" },
+		{ "turn off ", "off" },
+		{ "switch on ", "on" },
+		{ "switch off ", "off" },
+		{ "enable ", "on" },
+		{ "disable ", "off" },
+		{ "toggle ", "toggle" },
+		{ "reset ", "reset" },
+		{ "run ", "run" },
+		{ "press ", "run" },
+		{ "click ", "run" },
+		{ "repeat ", "run" },
+		{ "play ", "play" },
+		{ "set ", "set" },
+		{ "turn ", "turn" },
+		{ "switch ", "turn" },
+	}
+	local SUGGESTABLE = {
+		Toggle = true,
+		Slider = true,
+		Dropdown = true,
+		Input = true,
+		Keybind = true,
+		Colorpicker = true,
+		Segmented = true,
+		Stepper = true,
+		Radio = true,
+		Button = true,
+		Macro = true,
+	}
+
+	local function Location(row, tab)
+		local section = row.Group.Block and row.Group.Block.Title
+		return (section and section ~= "") and (tab.Title .. " › " .. section) or tab.Title
+	end
+
+	-- Enabled controls whose title (or description and keywords) match `name`.
+	local function FindControls(name)
+		local found = {}
+		if #name < 2 then
+			return found
+		end
+		for _, tab in ipairs(Window.Tabs) do
+			for _, row in ipairs(tab.Rows) do
+				if row.Element and row.Title ~= "" and not row.Destroyed and not row.Disabled and row:_IsShown() then
+					local score = Score({
+						TitleLower = row.Title:lower(),
+						Search = (row.Description .. " " .. row.Keywords):lower(),
+					}, name)
+					if score >= 50 or (score > 0 and #name >= 3) then
+						table.insert(found, { Element = row.Element, Row = row, Tab = tab, Score = score })
+					end
 				end
 			end
 		end
-		table.sort(results, function(a, b)
+		table.sort(found, function(a, b)
+			return a.Score > b.Score
+		end)
+		return found
+	end
+
+	-- What `text` means for this control ("50", "off", "hard", "red"), or nil.
+	-- Text fields only take a value from an explicit "name = value".
+	local function Interpret(element, text, raw, explicit)
+		local kind = element.Type
+		if kind == "Toggle" then
+			if ON_WORDS[text] then
+				return true
+			elseif OFF_WORDS[text] then
+				return false
+			end
+		elseif kind == "Slider" or kind == "Stepper" then
+			local min, max = tonumber(element.Min), tonumber(element.Max)
+			if (text == "max" or text == "maximum") and max then
+				return max
+			elseif (text == "min" or text == "minimum") and min then
+				return min
+			end
+			local number = tonumber(text:match("^(%-?%d*%.?%d+)%s*[^%d%s]*$"))
+			if number then
+				return (min and max) and math.clamp(number, min, max) or number
+			end
+		elseif kind == "Dropdown" or kind == "Segmented" or kind == "Radio" then
+			local prefix, count = nil, 0
+			for _, option in ipairs(element.Values or {}) do
+				local lower = tostring(option):lower()
+				if lower == text then
+					return option
+				elseif #text >= 2 and lower:sub(1, #text) == text then
+					prefix, count = option, count + 1
+				end
+			end
+			if count == 1 then
+				return prefix
+			end
+		elseif kind == "Colorpicker" then
+			if COLOR_WORDS[text] then
+				return COLOR_WORDS[text]
+			end
+			local hex = text:match("^#?(%x%x%x%x%x%x)$")
+			if hex then
+				return Color3.fromHex(hex)
+			end
+		elseif kind == "Input" and explicit and raw ~= "" then
+			return raw
+		end
+		return nil
+	end
+
+	local function Describe(element, value)
+		if typeof(value) == "Color3" then
+			return "#" .. value:ToHex():upper()
+		elseif type(value) == "number" then
+			return tostring(Round(value, 3)) .. tostring(element.Suffix or "")
+		end
+		return tostring(value)
+	end
+
+	local function NewAction(match, title, icon, valueText, run)
+		local element, row = match.Element, match.Row
+		local ok, current = pcall(element.GetText, element)
+		local now = (ok and current and current ~= "") and ("  ·  now " .. tostring(current)) or ""
+		return {
+			Kind = "Action",
+			Key = tostring(row) .. "|" .. title,
+			Row = row,
+			Element = element,
+			Tab = match.Tab,
+			Title = title,
+			Subtitle = Location(row, match.Tab) .. now,
+			Icon = icon or "wand-2",
+			TileColor = function()
+				return MacUI.Accent
+			end,
+			ValueText = valueText,
+			Score = match.Score,
+			Run = run,
+		}
+	end
+
+	-- "Set X to V", "Turn off X", "Add V to X"; nil when nothing would change.
+	local function ValueAction(match, value)
+		local element, title = match.Element, match.Row.Title
+		local kind = element.Type
+		if kind == "Toggle" then
+			if element.Value == value then
+				return nil
+			end
+			return NewAction(match, "Turn " .. (value and "on " or "off ") .. title, value and "toggle-right" or "toggle-left", "Apply", function()
+				element:SetValue(value)
+				return title, value and "On" or "Off"
+			end)
+		elseif kind == "Dropdown" and element.Multi then
+			local has = element.Value[value] == true
+			local phrase = has and ("Remove " .. tostring(value) .. " from ") or ("Add " .. tostring(value) .. " to ")
+			return NewAction(match, phrase .. title, "list-checks", "Apply", function()
+				local set = table.clone(element.Value)
+				set[value] = (not has) or nil
+				element:SetValue(set)
+				return title, element:GetText()
+			end)
+		elseif kind == "Colorpicker" then
+			return NewAction(match, "Set " .. title .. " to " .. Describe(element, value), "palette", "Apply", function()
+				element:SetValueRGB(value)
+				return title, Describe(element, value)
+			end)
+		end
+		if SameValue(element.Value, value) then
+			return nil
+		end
+		return NewAction(match, "Set " .. title .. " to " .. Describe(element, value), nil, "Apply", function()
+			element:SetValue(value)
+			return title, element:GetText()
+		end)
+	end
+
+	-- "Turn off X in 30 min" (value nil flips it)
+	local function TimerAction(match, value, seconds)
+		local element, title = match.Element, match.Row.Title
+		if element.Type ~= "Toggle" then
+			return nil
+		end
+		if value == nil then
+			value = not element.Value
+		end
+		if value == element.Value then
+			return nil
+		end
+		local when = DescribeDuration(seconds)
+		return NewAction(match, "Turn " .. (value and "on " or "off ") .. title .. " in " .. when, "timer", "Start", function()
+			element:SetTimer(seconds, value)
+			return title, (value and "on" or "off") .. " in " .. when
+		end)
+	end
+
+	-- "Press X every 10 s"
+	local function RepeatAction(match, seconds)
+		local element, title = match.Element, match.Row.Title
+		if element.Type ~= "Button" then
+			return nil
+		end
+		local every = DescribeDuration(seconds)
+		return NewAction(match, "Press " .. title .. " every " .. every, "repeat", "Start", function()
+			element:SetRepeat(seconds)
+			return title, "every " .. every
+		end)
+	end
+
+	local function WindowAction(key, title, subtitle, icon, run)
+		return {
+			Kind = "Action",
+			Key = key,
+			Title = title,
+			Subtitle = subtitle,
+			Icon = icon,
+			TileColor = function()
+				return MacUI.Accent
+			end,
+			Score = 100,
+			Run = run,
+		}
+	end
+
+	local function ParseActions(input)
+		local raw = input:gsub("^%s+", ""):gsub("%s+$", ""):gsub("%s+", " ")
+		local text = raw:lower()
+		local actions, seen = {}, {}
+		local function Add(action)
+			if action and not seen[action.Key] then
+				seen[action.Key] = true
+				table.insert(actions, action)
+			end
+		end
+		if #text < 3 then
+			return actions
+		end
+
+		-- the window itself: themes, accents, undo
+		local themeWord = text:gsub("^switch to ", ""):gsub("^theme ", ""):gsub(" theme$", ""):gsub(" mode$", "")
+		for _, name in ipairs(MacUI:GetThemes()) do
+			if name:lower() == themeWord and name ~= MacUI.ThemeName then
+				Add(WindowAction("theme:" .. name, "Switch to the " .. name .. " theme", "Appearance", "palette", function()
+					MacUI:SetTheme(name)
+					return "Theme", name
+				end))
+			end
+		end
+		local accentWord = text:match("^accent (.+)$") or text:match("^(.+) accent$")
+		if accentWord then
+			for _, name in ipairs(MacUI.AccentOrder) do
+				if name:lower() == accentWord and MacUI.Accents[name] ~= MacUI.Accent then
+					Add(WindowAction("accent:" .. name, "Use " .. name .. " as the accent colour", "Appearance", "palette", function()
+						MacUI:SetAccent(name)
+						return "Accent", name
+					end))
+				end
+			end
+		end
+		if text == "undo" and MacUI:CanUndo() then
+			Add(WindowAction("undo", "Undo the last change", "Ctrl + Z", "undo-2", function()
+				MacUI:Undo()
+			end))
+		elseif text == "redo" and MacUI:CanRedo() then
+			Add(WindowAction("redo", "Redo the last change", "Ctrl + Shift + Z", "redo-2", function()
+				MacUI:Redo()
+			end))
+		elseif (text == "cancel timers" or text == "stop timers") and next(ActiveTimers) ~= nil then
+			Add(WindowAction("timers", "Cancel every timer", "Timers and repeats", "timer-off", function()
+				MacUI:CancelTimers()
+				return "Timers", "Cancelled"
+			end))
+		end
+
+		-- "... in 20m" / "... after 1h" (toggle timers), "... every 30s" (repeats)
+		local first, last = 1, #text
+		local timing, seconds
+		local head, rest = text:match("^(.-) in (.+)$")
+		if not head then
+			head, rest = text:match("^(.-) after (.+)$")
+		end
+		local duration = head and head ~= "" and ParseDuration(rest, "m")
+		if duration then
+			timing, seconds, last = "in", duration, #head
+		else
+			head, rest = text:match("^(.-) every (.+)$")
+			duration = head and head ~= "" and ParseDuration(rest, "s")
+			if duration then
+				timing, seconds, last = "every", duration, #head
+			end
+		end
+
+		-- a leading verb: "turn off", "enable", "reset", "run", "play", "set"...
+		local verb
+		for _, spec in ipairs(ACTION_VERBS) do
+			if text:sub(1, #spec[1]) == spec[1] and #spec[1] < last then
+				verb, first = spec[2], #spec[1] + 1
+				break
+			end
+		end
+		local body = text:sub(first, last)
+		local rawBody = raw:sub(first, last)
+
+		if verb == "on" or verb == "off" or verb == "toggle" then
+			for _, match in ipairs(FindControls(body)) do
+				if match.Element.Type == "Toggle" then
+					local value = (verb == "toggle" and not match.Element.Value) or verb == "on"
+					Add(timing == "in" and TimerAction(match, value, seconds) or ValueAction(match, value))
+				end
+			end
+		elseif verb == "reset" then
+			for _, match in ipairs(FindControls(body)) do
+				local element = match.Element
+				if (element.Default ~= nil or element._Reset) and not element:IsDefault() then
+					Add(NewAction(match, "Reset " .. match.Row.Title, "rotate-ccw", "Reset", function()
+						element:Reset()
+						return match.Row.Title, "Reset"
+					end))
+				end
+			end
+		elseif verb == "run" then
+			for _, match in ipairs(FindControls(body)) do
+				local element = match.Element
+				if element.Type == "Button" then
+					Add(timing == "every" and RepeatAction(match, seconds) or NewAction(match, "Press " .. match.Row.Title, "play", "Run", function()
+						element:Fire()
+						return match.Row.Title, nil
+					end))
+				end
+			end
+			for _, command in ipairs(Window.Commands) do
+				local score = Score({ TitleLower = command.Title:lower(), Search = command.Keywords:lower() }, body)
+				if timing == nil and score >= 50 then
+					local entry = WindowAction("command:" .. command.Title, "Run " .. command.Title, command.Description or "Command", command.Icon, function()
+						command:Run(true)
+					end)
+					entry.TileColor = command.TileColor
+					entry.Score = score
+					Add(entry)
+				end
+			end
+		elseif verb == "play" then
+			for _, match in ipairs(FindControls(body)) do
+				local element = match.Element
+				if element.Type == "Macro" and #element.Steps > 0 then
+					Add(NewAction(match, (element.Playing and "Stop " or "Play ") .. match.Row.Title, "play", "Play", function()
+						element:_Activate(true)
+					end))
+				end
+			end
+		end
+
+		if verb == nil or verb == "set" or verb == "turn" then
+			-- "name = value", "name: value", "name to value" (text fields too)
+			local name, position = body:match("^(.-)%s*[=:]%s*()%S")
+			if not name or name == "" then
+				name, position = body:match("^(.-) to ()%S")
+			end
+			if name and name ~= "" then
+				local value, rawValue = body:sub(position), rawBody:sub(position)
+				for _, match in ipairs(FindControls(name)) do
+					local parsed = Interpret(match.Element, value, rawValue, true)
+					if parsed ~= nil then
+						Add(ValueAction(match, parsed))
+					end
+				end
+			end
+			-- "walk speed 50", "auto farm off", "difficulty hard", "fill red"
+			local words = {}
+			for word in body:gmatch("%S+") do
+				table.insert(words, word)
+			end
+			for split = #words - 1, math.max(#words - 3, 1), -1 do
+				local controlName = table.concat(words, " ", 1, split)
+				local value = table.concat(words, " ", split + 1)
+				for _, match in ipairs(FindControls(controlName)) do
+					local parsed = Interpret(match.Element, value, value, false)
+					if parsed ~= nil then
+						if timing == "in" then
+							Add(TimerAction(match, parsed, seconds))
+						elseif timing == nil then
+							Add(ValueAction(match, parsed))
+						end
+					end
+				end
+			end
+			-- "auto farm in 30m" flips it later; "collect every 10s" repeats it
+			if timing then
+				for _, match in ipairs(FindControls(body)) do
+					Add(timing == "in" and TimerAction(match, nil, seconds) or RepeatAction(match, seconds))
+				end
+			end
+		end
+
+		table.sort(actions, function(a, b)
+			return (a.Score or 0) > (b.Score or 0)
+		end)
+		while #actions > 3 do
+			table.remove(actions)
+		end
+		return actions
+	end
+
+	local function Heading(title)
+		return { Kind = "Header", Title = title }
+	end
+
+	local function SpotlightSearch(text)
+		local query = text:lower():gsub("^%s+", ""):gsub("%s+$", "")
+		local entries = CollectEntries()
+		local results = {}
+		if query == "" then
+			-- what you use most, then pages and commands
+			local suggestions = {}
+			for _, entry in ipairs(entries) do
+				local suggestable = entry.Kind == "Command" or (entry.Kind == "Row" and entry.Element and SUGGESTABLE[entry.Element.Type])
+				if suggestable then
+					entry.Frecency = Frecency(entry.UsageKey)
+					if entry.Frecency > 0 then
+						table.insert(suggestions, entry)
+					end
+				end
+			end
+			table.sort(suggestions, function(a, b)
+				if a.Frecency ~= b.Frecency then
+					return a.Frecency > b.Frecency
+				end
+				return a.Order < b.Order
+			end)
+			while #suggestions > 4 do
+				table.remove(suggestions)
+			end
+			local suggested = {}
+			if #suggestions > 0 then
+				table.insert(results, Heading("Suggestions"))
+				for _, entry in ipairs(suggestions) do
+					suggested[entry] = true
+					table.insert(results, entry)
+				end
+			end
+			local pages, commands = {}, {}
+			for _, entry in ipairs(entries) do
+				if entry.Kind == "Tab" then
+					table.insert(pages, entry)
+				elseif entry.Kind == "Command" and not suggested[entry] then
+					table.insert(commands, entry)
+				end
+			end
+			-- headings only when there's more than the list of pages
+			local headed = #suggestions > 0 or #commands > 0
+			if headed then
+				table.insert(results, Heading("Pages"))
+			end
+			for _, entry in ipairs(pages) do
+				table.insert(results, entry)
+			end
+			if #commands > 0 then
+				table.insert(results, Heading("Commands"))
+				for _, entry in ipairs(commands) do
+					table.insert(results, entry)
+				end
+			end
+			return results
+		end
+
+		local matches = {}
+		for _, entry in ipairs(entries) do
+			local score = Score(entry, query)
+			if score > 0 then
+				entry.Score = score
+				entry.Frecency = Frecency(entry.UsageKey)
+				table.insert(matches, entry)
+			end
+		end
+		table.sort(matches, function(a, b)
 			if a.Score ~= b.Score then
 				return a.Score > b.Score
 			elseif (a.Kind == "Tab") ~= (b.Kind == "Tab") then
 				return a.Kind == "Tab" -- pages first on a tie
+			elseif a.Frecency ~= b.Frecency then
+				return a.Frecency > b.Frecency -- then what you use most
 			end
 			return a.Order < b.Order
 		end)
-		while #results > 40 do
-			table.remove(results)
+		while #matches > 40 do
+			table.remove(matches)
+		end
+		local actions = ParseActions(text)
+		if #actions == 0 then
+			return matches
+		end
+		table.insert(results, Heading("Actions"))
+		for _, action in ipairs(actions) do
+			table.insert(results, action)
+		end
+		if #matches > 0 then
+			table.insert(results, Heading("Results"))
+			for _, entry in ipairs(matches) do
+				table.insert(results, entry)
+			end
 		end
 		return results
 	end
 
-	function Window:OpenSpotlight()
+	-- `query` (optional) starts Spotlight with that text typed in.
+	function Window:OpenSpotlight(query)
 		if Spotlight.Open or MacUI.Unloaded or config.Spotlight == false then
 			return
 		end
@@ -8024,7 +9980,8 @@ function MacUI:CreateWindow(config)
 		Spotlight.Open = true
 		local scale = Window.Scale
 		local width, searchHeight, itemHeight, maxVisible = 580, 54, 46, 7
-		local results, items, selected = {}, {}, 1
+		local headerHeight = 26
+		local results, items, rendered, selected, visibleHeight = {}, {}, {}, 1, 0
 		local pointerMoved, renderMouse = false, MousePosition()
 		local connections = {}
 
@@ -8040,7 +9997,7 @@ function MacUI:CreateWindow(config)
 		local rootSize = Root.AbsoluteSize
 		local half = width * scale / 2
 		local centerX = math.clamp(rootPosition.X + rootSize.X / 2, half + 8, math.max(half + 8, screen.X - half - 8))
-		local top = math.clamp(rootPosition.Y + 44 * RootScale.Scale, 8, math.max(8, screen.Y - (searchHeight + 7 * itemHeight + 20) * scale))
+		local top = math.clamp(rootPosition.Y + 44 * RootScale.Scale, 8, math.max(8, screen.Y - (searchHeight + maxVisible * itemHeight + 2 * headerHeight + 20) * scale))
 		local holder = New("Frame", {
 			Name = "Panel",
 			BackgroundTransparency = 1,
@@ -8084,8 +10041,8 @@ function MacUI:CreateWindow(config)
 		})
 		local box = New("TextBox", {
 			Name = "Query",
-			Text = "",
-			PlaceholderText = "Search settings and actions",
+			Text = type(query) == "string" and query or "",
+			PlaceholderText = "Search, or type a setting and a value",
 			TextSize = 19,
 			Position = UDim2.fromOffset(50, 0),
 			Size = UDim2.new(1, -110, 0, searchHeight),
@@ -8181,6 +10138,14 @@ function MacUI:CreateWindow(config)
 			elseif entry.Kind == "Command" then
 				entry.Command:Run(true)
 				return
+			elseif entry.Kind == "Action" then
+				local ok, title, detail = pcall(entry.Run)
+				if not ok then
+					warn("[MacUI] " .. tostring(title))
+				elseif title then
+					Window:Toast(title, { Detail = detail, Icon = entry.Icon, Highlight = true })
+				end
+				return
 			end
 			local element = entry.Element
 			if not reveal and not entry.Row.Disabled and element and element._Activate then
@@ -8197,103 +10162,134 @@ function MacUI:CreateWindow(config)
 					Restyle(object, 0.08)
 				end
 			end
-			local top = (selected - 1) * itemHeight
-			local visibleHeight = math.min(#results, maxVisible) * itemHeight
+			local item = items[selected]
+			if not item then
+				return
+			end
+			-- keep the selection (and the heading above it) in view
+			local top = item.Top - (item.HeaderAbove and headerHeight or 0)
+			local bottom = item.Top + itemHeight
 			local current = list.CanvasPosition.Y
 			if top < current then
-				list.CanvasPosition = Vector2.new(0, top)
-			elseif top + itemHeight > current + visibleHeight then
-				list.CanvasPosition = Vector2.new(0, top + itemHeight - visibleHeight)
+				list.CanvasPosition = Vector2.new(0, math.max(top, 0))
+			elseif bottom > current + visibleHeight then
+				list.CanvasPosition = Vector2.new(0, bottom - visibleHeight)
 			end
 		end
 
 		local function Render()
-			for _, item in ipairs(items) do
-				item.Button:Destroy()
+			for _, object in ipairs(rendered) do
+				object:Destroy()
 			end
+			table.clear(rendered)
 			table.clear(items)
 			results = SpotlightSearch(box.Text)
-			selected = math.clamp(selected, 1, math.max(#results, 1))
 			pointerMoved, renderMouse = false, MousePosition()
-			for index, entry in ipairs(results) do
-				local item = { Entry = entry, Selected = false }
-				local function Foreground(normal)
-					return function(t)
-						return item.Selected and t.SelectionText or t[normal]
+			local y, headingAbove = 0, false
+			for order, entry in ipairs(results) do
+				if entry.Kind == "Header" then
+					local heading = New("TextLabel", {
+						Name = "Header",
+						Text = entry.Title,
+						TextSize = 11,
+						Weight = Enum.FontWeight.Bold,
+						Size = UDim2.new(1, 0, 0, headerHeight),
+						TextYAlignment = Enum.TextYAlignment.Bottom,
+						LayoutOrder = order,
+						Theme = { TextColor3 = "Tertiary" },
+						Parent = listContent,
+					})
+					Padding(heading, 0, 10, 6, 10)
+					table.insert(rendered, heading)
+					y += headerHeight
+					headingAbove = true
+				else
+					local index = #items + 1
+					local item = { Entry = entry, Selected = false, Top = y, HeaderAbove = headingAbove }
+					headingAbove = false
+					y += itemHeight
+					local function Foreground(normal)
+						return function(t)
+							return item.Selected and t.SelectionText or t[normal]
+						end
 					end
-				end
-				item.Button = New("TextButton", {
-					Name = "Result",
-					Size = UDim2.new(1, 0, 0, itemHeight),
-					LayoutOrder = index,
-					Theme = {
-						BackgroundColor3 = "Accent",
-						BackgroundTransparency = function()
-							return item.Selected and 0 or 1
-						end,
-					},
-					Parent = listContent,
-				})
-				Corner(item.Button, 9)
-				local tab = entry.Tab
-				IconTile(item.Button, entry.Icon or (tab and tab.Icon) or "layers", entry.TileColor or (tab and tab.TileColor), 28, 7, 16, {
-					AnchorPoint = Vector2.new(0, 0.5),
-					Position = UDim2.new(0, 10, 0.5, 0),
-				})
-				local value = EntryValue(entry)
-				local reserve = value and 150 or 60
-				local title = New("TextLabel", {
-					Text = entry.Title,
-					TextSize = 14,
-					Weight = Enum.FontWeight.Medium,
-					Position = UDim2.fromOffset(50, 6),
-					Size = UDim2.new(1, -reserve, 0, 18),
-					TextTruncate = Enum.TextTruncate.AtEnd,
-					Theme = { TextColor3 = Foreground("Text") },
-					Parent = item.Button,
-				})
-				local subtitle = New("TextLabel", {
-					Text = entry.Subtitle,
-					TextSize = 12,
-					Position = UDim2.fromOffset(50, 24),
-					Size = UDim2.new(1, -reserve, 0, 15),
-					TextTruncate = Enum.TextTruncate.AtEnd,
-					Theme = { TextColor3 = Foreground("SubText") },
-					Parent = item.Button,
-				})
-				item.Painted = { item.Button, title, subtitle }
-				if value then
-					table.insert(item.Painted, New("TextLabel", {
-						Text = value,
-						TextSize = 13,
-						AnchorPoint = Vector2.new(1, 0.5),
-						Position = UDim2.new(1, -14, 0.5, 0),
-						Size = UDim2.fromOffset(110, 18),
-						TextXAlignment = Enum.TextXAlignment.Right,
+					item.Button = New("TextButton", {
+						Name = "Result",
+						Size = UDim2.new(1, 0, 0, itemHeight),
+						LayoutOrder = order,
+						Theme = {
+							BackgroundColor3 = "Accent",
+							BackgroundTransparency = function()
+								return item.Selected and 0 or 1
+							end,
+						},
+						Parent = listContent,
+					})
+					Corner(item.Button, 9)
+					local tab = entry.Tab
+					IconTile(item.Button, entry.Icon or (tab and tab.Icon) or "layers", entry.TileColor or (tab and tab.TileColor), 28, 7, 16, {
+						AnchorPoint = Vector2.new(0, 0.5),
+						Position = UDim2.new(0, 10, 0.5, 0),
+					})
+					local value = EntryValue(entry)
+					local reserve = value and 150 or 60
+					local title = New("TextLabel", {
+						Text = entry.Title,
+						TextSize = 14,
+						Weight = Enum.FontWeight.Medium,
+						Position = UDim2.fromOffset(50, 6),
+						Size = UDim2.new(1, -reserve, 0, 18),
+						TextTruncate = Enum.TextTruncate.AtEnd,
+						Theme = { TextColor3 = Foreground("Text") },
+						Parent = item.Button,
+					})
+					local subtitle = New("TextLabel", {
+						Text = entry.Subtitle,
+						TextSize = 12,
+						Position = UDim2.fromOffset(50, 24),
+						Size = UDim2.new(1, -reserve, 0, 15),
 						TextTruncate = Enum.TextTruncate.AtEnd,
 						Theme = { TextColor3 = Foreground("SubText") },
 						Parent = item.Button,
-					}))
-				end
-				local function Hover()
-					if not pointerMoved and (MousePosition() - renderMouse).Magnitude > 1 then
-						pointerMoved = true
+					})
+					item.Painted = { item.Button, title, subtitle }
+					if value then
+						table.insert(item.Painted, New("TextLabel", {
+							Text = value,
+							TextSize = 13,
+							AnchorPoint = Vector2.new(1, 0.5),
+							Position = UDim2.new(1, -14, 0.5, 0),
+							Size = UDim2.fromOffset(110, 18),
+							TextXAlignment = Enum.TextXAlignment.Right,
+							TextTruncate = Enum.TextTruncate.AtEnd,
+							Theme = { TextColor3 = Foreground("SubText") },
+							Parent = item.Button,
+						}))
 					end
-					if pointerMoved and selected ~= index then
-						selected = index
-						Paint()
+					local function Hover()
+						if not pointerMoved and (MousePosition() - renderMouse).Magnitude > 1 then
+							pointerMoved = true
+						end
+						if pointerMoved and selected ~= index then
+							selected = index
+							Paint()
+						end
 					end
+					item.Button.MouseEnter:Connect(Hover)
+					item.Button.MouseMoved:Connect(Hover)
+					item.Button.MouseButton1Click:Connect(function()
+						Activate(entry, false)
+					end)
+					table.insert(items, item)
+					table.insert(rendered, item.Button)
 				end
-				item.Button.MouseEnter:Connect(Hover)
-				item.Button.MouseMoved:Connect(Hover)
-				item.Button.MouseButton1Click:Connect(function()
-					Activate(entry, false)
-				end)
-				table.insert(items, item)
 			end
-			empty.Visible = #results == 0 and box.Text ~= ""
-			divider.Visible = #results > 0 or empty.Visible
-			local listHeight = #results > 0 and (math.min(#results, maxVisible) * itemHeight + 12) or (empty.Visible and 52 or 0)
+			selected = math.clamp(selected, 1, math.max(#items, 1))
+			empty.Visible = #items == 0 and box.Text ~= ""
+			divider.Visible = #items > 0 or empty.Visible
+			-- room for two headings on top of the usual seven rows
+			visibleHeight = math.min(y, maxVisible * itemHeight + 2 * headerHeight)
+			local listHeight = #items > 0 and (visibleHeight + 12) or (empty.Visible and 52 or 0)
 			Tween(holder, { Size = UDim2.fromOffset(width, searchHeight + (listHeight > 0 and listHeight + 1 or 0)) }, 0.18)
 			Paint()
 		end
@@ -8305,7 +10301,7 @@ function MacUI:CreateWindow(config)
 		end))
 		table.insert(connections, UserInputService.InputBegan:Connect(function(input)
 			if input.KeyCode == Enum.KeyCode.Down then
-				selected = math.min(selected + 1, math.max(#results, 1))
+				selected = math.min(selected + 1, math.max(#items, 1))
 				Paint()
 			elseif input.KeyCode == Enum.KeyCode.Up then
 				selected = math.max(selected - 1, 1)
@@ -8321,7 +10317,7 @@ function MacUI:CreateWindow(config)
 				return
 			end
 			if enterPressed then
-				local entry = results[selected]
+				local entry = items[selected] and items[selected].Entry
 				if entry then
 					local reveal = UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) or UserInputService:IsKeyDown(Enum.KeyCode.RightShift)
 					Activate(entry, reveal)
@@ -8345,6 +10341,7 @@ function MacUI:CreateWindow(config)
 		task.defer(function()
 			if Spotlight.Open then
 				box:CaptureFocus()
+				box.CursorPosition = #box.Text + 1
 			end
 		end)
 	end
@@ -8392,7 +10389,8 @@ function MacUI:CreateWindow(config)
 			if announce ~= false then
 				Window:Toast(self.Title, { Icon = self.Icon })
 			end
-			Spawn(self.Callback)
+			NoteUsage("c:" .. self.Title)
+			RunCallback(self, self.Callback)
 		end
 		function command:SetShortcut(key)
 			if typeof(key) == "EnumItem" then
@@ -8802,6 +10800,9 @@ function MacUI:CreateWindow(config)
 	if config.KeybindList then
 		Window:SetKeybindList(true)
 	end
+	if config.PerformanceGuard then
+		MacUI:SetPerformanceGuard(config.PerformanceGuard)
+	end
 	return Window
 end
 
@@ -8851,6 +10852,12 @@ function MacUI:Destroy()
 	end
 	for loader in pairs(ActiveLoaders) do
 		loader:Close()
+	end
+	table.clear(ActiveTimers)
+	Macros.Recorder = nil
+	if Guard.Connection then
+		Guard.Connection:Disconnect()
+		Guard.Connection = nil
 	end
 	self:ClearHistory()
 	table.clear(ThemeRegistry)

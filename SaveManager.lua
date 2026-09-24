@@ -10,8 +10,8 @@
 	SaveManager:BuildConfigSection(Tabs.Settings)
 	SaveManager:LoadAutoloadConfig()
 
-	Toggle and button shortcuts are saved too, and "Save changes
-	automatically" keeps the current profile up to date as you play.
+	Toggle and button shortcuts and recorded macros are saved too, and "Save
+	changes automatically" keeps the current profile up to date as you play.
 	ExportConfig() / ImportConfig(text) share settings as text.
 ]]
 
@@ -167,6 +167,22 @@ SaveManager.Parser = {
 			if option then
 				option:SetValue(data.value)
 			end
+		end,
+	},
+	-- recorded steps, loop and speed (see Section:AddMacro)
+	Macro = {
+		Save = function(idx, object)
+			return { type = "Macro", idx = idx, value = object:Export(), shortcut = object.Shortcut or "None" }
+		end,
+		Load = function(idx, data)
+			local option = SaveManager.Library.Options[idx]
+			if not option then
+				return
+			end
+			if type(data.value) == "table" and option.Import then
+				option:Import(data.value)
+			end
+			ApplyShortcut(option, data.shortcut)
 		end,
 	},
 }

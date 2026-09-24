@@ -91,6 +91,7 @@ local Window = MacUI:CreateWindow({
 	ShowDock = true, -- dock icon while minimised
 	Loading = { Subtitle = "Loading every demo…" }, -- a loading card while the tabs build
 	Undo = true, -- Ctrl + Z / Ctrl + Shift + Z for changes you make
+	PerformanceGuard = true, -- pause blur and animations if the game slows down
 	-- Watermark = true, -- a status pill; this demo turns it on from the Advanced page
 })
 
@@ -102,6 +103,7 @@ local Tabs = {
 	Methods = Window:AddTab({ Title = "Methods", Icon = "wrench", Description = "What you can do with an element after creating it." }),
 	Smart = Window:AddTab({ Title = "Smart rows", Icon = "wand-2", Description = "Dependencies, tooltips, search keywords and live player lists." }),
 	Advanced = Window:AddTab({ Title = "Advanced", Icon = "rocket", Description = "Live graphs, tables, undo, Spotlight commands, the watermark, loading screens and collapsible sections." }),
+	Automation = Window:AddTab({ Title = "Automation", Icon = "bot", Description = "Timers, macros, typed commands, suggestions, an error inspector and a frame-rate guard." }),
 	Window = Window:AddTab({ Title = "Window", Icon = "app-window", Section = "Window", Description = "Title bar, layout, navigation and saved state." }),
 	Alerts = Window:AddTab({ Title = "Alerts", Icon = "bell", Description = "Notifications, toasts and dialogs." }),
 	Appearance = Window:AddTab({ Title = "Appearance", Icon = "palette", Section = "Settings", Description = "Themes, accent colours, fonts, frosted glass and more." }),
@@ -891,6 +893,164 @@ LoadingSection:AddButton({
 			task.wait(0.4)
 			loader:Finish("Done")
 		end)
+	end,
+})
+
+--------------------------------------------------------------------------------
+-- Automation
+--------------------------------------------------------------------------------
+
+local TimerSection = Tabs.Automation:AddSection({
+	Title = "Timers",
+	Description = "Right-click any switch for “Turn Off After…”, or any button for “Repeat Every…”.",
+	Icon = "timer",
+})
+TimerSection:AddToggle("DemoTimerSwitch", {
+	Title = "Demo switch",
+	Description = "A countdown shows on this row while a timer runs. Click it to change or cancel.",
+	Default = false,
+})
+TimerSection:AddButton({
+	Title = "Toggle:SetTimer(10)",
+	Description = "Flips the demo switch in 10 seconds.",
+	ButtonText = "Start",
+	Callback = function()
+		Options.DemoTimerSwitch:SetTimer(10)
+	end,
+})
+local rewards = 0
+local RewardCount = TimerSection:AddLabel("DemoRewardCount", { Title = "Rewards collected", Value = "0" })
+TimerSection:AddButton({
+	Title = "Collect reward",
+	Description = "Counts presses, so you can see a repeat working.",
+	ButtonText = "Collect",
+	Flag = "DemoCollect",
+	Callback = function()
+		rewards += 1
+		RewardCount:SetValue(tostring(rewards))
+	end,
+})
+TimerSection:AddButton({
+	Title = "Button:SetRepeat(2)",
+	Description = "Presses “Collect reward” every 2 seconds; press again to stop.",
+	ButtonText = "Repeat",
+	Callback = function()
+		local collect = Options.DemoCollect
+		collect:SetRepeat(not collect.RepeatInterval and 2 or nil)
+		Window:Toast("Collect reward", { Detail = collect.RepeatInterval and "every 2 s" or "stopped", Icon = "repeat" })
+	end,
+})
+
+local MacroSection = Tabs.Automation:AddSection({
+	Title = "Macros",
+	Description = "AddMacro records what you change and press, then plays it back with the same timing.",
+	Icon = "circle-dot",
+})
+MacroSection:AddMacro("DemoMacro", {
+	Title = "Demo routine",
+	Description = "Press record, change the controls below, then stop and press play.",
+})
+MacroSection:AddToggle("DemoLights", { Title = "Lights", Default = false })
+MacroSection:AddToggle("DemoMusic", { Title = "Music", Default = false })
+MacroSection:AddSlider("DemoVolume", { Title = "Volume", Min = 0, Max = 100, Default = 25, Suffix = "%" })
+MacroSection:AddButton({
+	Title = "Macro:SetLoop",
+	Description = "Plays the routine over and over until you press stop.",
+	ButtonText = "Loop",
+	Callback = function()
+		local macro = Options.DemoMacro
+		macro:SetLoop(not macro.Loop)
+		Window:Toast("Demo routine", { Detail = macro.Loop and "loops" or "plays once", Icon = "repeat" })
+	end,
+})
+
+local Typing = Tabs.Automation:AddSection({
+	Title = "Type to control",
+	Description = "Spotlight understands a setting followed by a value. Try one:",
+	Icon = "wand-2",
+})
+for _, example in ipairs({ "volume 80", "lights on", "music on in 30s", "collect reward every 5s", "reset volume", "light mode" }) do
+	Typing:AddButton({
+		Title = "“" .. example .. "”",
+		Description = "Window:OpenSpotlight(text) opens Spotlight with this typed in.",
+		ButtonText = "Try",
+		Callback = function()
+			Window:OpenSpotlight(example)
+		end,
+	})
+end
+
+local Learning = Tabs.Automation:AddSection({
+	Title = "Suggestions",
+	Description = "Open Spotlight with nothing typed: what you use most comes first. InterfaceManager remembers it.",
+	Icon = "lightbulb",
+})
+local function MostUsed()
+	local list = {}
+	for key, entry in pairs(MacUI:GetUsage()) do
+		table.insert(list, { Key = key, Count = entry.c })
+	end
+	table.sort(list, function(a, b)
+		return a.Count > b.Count
+	end)
+	local names = {}
+	for index = 1, math.min(3, #list) do
+		local key = list[index].Key
+		local idx = key:match("^o:(.+)$")
+		local name = idx and Options[idx] and Options[idx].Title or key:gsub("^%a:", ""):gsub("^.*/", "")
+		table.insert(names, tostring(name))
+	end
+	return #names > 0 and table.concat(names, ", ") or "Nothing yet"
+end
+local UsageLabel = Learning:AddLabel({ Title = "MacUI:GetUsage", Description = "Your most used settings.", Value = MostUsed() })
+MacUI.UsageChanged:Connect(function()
+	UsageLabel:SetValue(MostUsed())
+end)
+Learning:AddButton({
+	Title = "MacUI:ClearUsage",
+	Description = "Forget what Spotlight learned.",
+	ButtonText = "Clear",
+	Callback = function()
+		MacUI:ClearUsage()
+		Window:Toast("Suggestions", { Detail = "cleared", Icon = "lightbulb" })
+	end,
+})
+
+local Inspector = Tabs.Automation:AddSection({
+	Title = "Error inspector",
+	Description = "When a callback fails, its row gets a red badge. Hover it for the message, click it for details.",
+	Icon = "bug",
+})
+local LastError = Inspector:AddLabel({ Title = "MacUI.CallbackError", Description = "The last error any control reported.", Value = "None" })
+MacUI.CallbackError:Connect(function(element, message)
+	LastError:SetValue(tostring(element and element.Title or "?") .. ": " .. tostring(message):gsub("^.-:%d+: ", ""))
+end)
+Inspector:AddButton({
+	Title = "Break on purpose",
+	Description = "Its callback errors. Try it, then click the badge.",
+	ButtonText = "Break",
+	Style = "Destructive",
+	Callback = function()
+		local settings = nil
+		return settings.Speed -- attempt to index nil
+	end,
+})
+
+local GuardSection = Tabs.Automation:AddSection({
+	Title = "Frame-rate guard",
+	Description = "CreateWindow({ PerformanceGuard = true }): below 30 fps, blur and animations pause until the game catches up.",
+	Icon = "gauge",
+})
+local GuardStatus = GuardSection:AddLabel({ Title = "Effects", Value = "Running" })
+MacUI.PerformanceChanged:Connect(function(paused)
+	GuardStatus:SetValue(paused and "Paused (low frame rate)" or "Running")
+end)
+GuardSection:AddToggle("DemoGuard", {
+	Title = "MacUI:SetPerformanceGuard",
+	Description = "Also under Appearance › Protect frame rate.",
+	Default = true,
+	Callback = function(on)
+		MacUI:SetPerformanceGuard(on)
 	end,
 })
 
