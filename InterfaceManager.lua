@@ -146,6 +146,7 @@ function InterfaceManager:BuildInterfaceSection(tab)
 		Default = settings.Scale or 100,
 		Increment = 5,
 		Suffix = "%",
+		Finished = true, -- rescale once the drag ends, not on every step
 		Callback = function(value)
 			settings.Scale = value
 			if scaleReady then

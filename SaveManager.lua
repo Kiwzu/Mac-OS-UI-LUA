@@ -53,7 +53,9 @@ SaveManager.Parser = {
 	},
 	Dropdown = {
 		Save = function(idx, object)
-			return { type = "Dropdown", idx = idx, value = object.Value, multi = object.Multi }
+			-- multi-selections are stored as a list so numeric values survive JSON
+			local value = object.Multi and object:GetActiveValues() or object.Value
+			return { type = "Dropdown", idx = idx, value = value, multi = object.Multi }
 		end,
 		Load = function(idx, data)
 			local option = SaveManager.Library.Options[idx]

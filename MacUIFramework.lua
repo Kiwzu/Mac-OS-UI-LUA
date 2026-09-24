@@ -49,6 +49,7 @@ local Players = GetService("Players")
 local TweenService = GetService("TweenService")
 local UserInputService = GetService("UserInputService")
 local TextService = GetService("TextService")
+local GuiService = GetService("GuiService")
 local Workspace = GetService("Workspace")
 
 local LocalPlayer = Players.LocalPlayer
@@ -323,11 +324,9 @@ end
 MacUI.ThemeChanged = Signal.new()
 MacUI.AccentChanged = Signal.new()
 
-local Connections = {}
-local function Track(connection)
-	table.insert(Connections, connection)
-	return connection
-end
+-- Set while a keybind is recording so the same key press doesn't also
+-- trigger other keybinds or the window's show/hide key.
+local KeyCapture = { Active = false }
 
 local function Tween(object, goals, duration, style, direction)
 	local tween = TweenService:Create(
@@ -396,10 +395,22 @@ local function Resolve(token)
 	return MacUI.ThemeData[token]
 end
 
+-- Drops registry entries when an instance is destroyed so closed popups,
+-- banners and dialogs can be garbage collected.
+local function Watch(instance)
+	instance.Destroying:Connect(function()
+		ThemeRegistry[instance] = nil
+		FontRegistry[instance] = nil
+	end)
+end
+
 local function Themed(instance, map)
 	local entry = ThemeRegistry[instance]
 	if not entry then
 		entry = {}
+		if FontRegistry[instance] == nil then
+			Watch(instance)
+		end
 		ThemeRegistry[instance] = entry
 	end
 	for property, token in pairs(map) do
@@ -477,6 +488,7 @@ local function New(className, props)
 		local weight = props and props.Weight or Enum.FontWeight.Regular
 		instance.FontFace = GetFont(weight)
 		FontRegistry[instance] = weight
+		Watch(instance)
 	end
 	local parent, theme, children
 	if props then
@@ -610,7 +622,8 @@ local function IconTile(parent, icon, color, size, radius, glyphSize, props)
 	end
 	Paint()
 	if type(color) == "function" then
-		Track(MacUI.AccentChanged:Connect(Paint))
+		local connection = MacUI.AccentChanged:Connect(Paint)
+		tile.Destroying:Connect(connection.Disconnect)
 	end
 	return tile, glyph, gradient
 end
@@ -1151,7 +1164,7 @@ local function CreateRow(container, info, options)
 end
 
 function RowMethods:_UpdateReserve()
-	local width = self.Accessory.AbsoluteSize.X / self.Window.Scale
+	local width = self.Accessory.AbsoluteSize.X / self.Window:GetAbsoluteScale()
 	if self.FullWidthText then
 		width = 0
 	end
@@ -1429,14 +1442,16 @@ function Container:AddLabel(idx, info)
 		TextXAlignment = Enum.TextXAlignment.Right,
 		TextTruncate = Enum.TextTruncate.AtEnd,
 		RichText = true,
-		Theme = { TextColor3 = info.ValueColor and function()
-			return ResolveColor(info.ValueColor) or MacUI.ThemeData.SubText
-		end or "SubText" },
+		Theme = {
+			TextColor3 = function(t)
+				return ResolveColor(info.ValueColor) or t.SubText
+			end,
+		},
 		Parent = row.Accessory,
 	})
 	local limit = New("UISizeConstraint", { MaxSize = Vector2.new(320, 18), Parent = valueLabel })
 	local function UpdateLimit()
-		local rowWidth = row.Frame.AbsoluteSize.X / row.Window.Scale
+		local rowWidth = row.Frame.AbsoluteSize.X / row.Window:GetAbsoluteScale()
 		local share = row.Title == "" and row.Description == "" and 1 or 0.62
 		limit.MaxSize = Vector2.new(math.max(rowWidth * share - 24, 40), 18)
 	end
@@ -1561,6 +1576,7 @@ function Container:AddToggle(idx, info)
 		Corner(knob, 9)
 	end
 
+	local pressed = false
 	local function Render(duration)
 		Restyle(track, duration)
 		if checkbox then
@@ -1571,7 +1587,7 @@ function Container:AddToggle(idx, info)
 			Tween(check, { ImageTransparency = Toggle.Value and 0 or 1 }, duration)
 			return
 		end
-		local width = row.Pressed and 22 or 18
+		local width = pressed and 22 or 18
 		local x = Toggle.Value and (36 - width) or 2
 		Tween(knob, { Position = UDim2.fromOffset(x, 2), Size = UDim2.fromOffset(width, 18) }, duration, Enum.EasingStyle.Quint)
 		Tween(knobShadow, { Position = UDim2.fromOffset(x, 3), Size = UDim2.fromOffset(width, 18) }, duration, Enum.EasingStyle.Quint)
@@ -1589,10 +1605,17 @@ function Container:AddToggle(idx, info)
 	end
 	if not checkbox then
 		row.Hitbox.MouseButton1Down:Connect(function()
+			pressed = true
 			Render(0.2)
 		end)
+		row.Hitbox.MouseButton1Up:Connect(function()
+			pressed = false
+		end)
 		row.Hitbox.MouseLeave:Connect(function()
-			Render(0.2)
+			if pressed then
+				pressed = false
+				Render(0.2)
+			end
 		end)
 	end
 
@@ -1614,8 +1637,14 @@ function Container:AddSlider(idx, info)
 	local Slider = NewElement("Slider", row, info)
 	Slider.Min = tonumber(info.Min) or 0
 	Slider.Max = tonumber(info.Max) or 100
-	Slider.Rounding = tonumber(info.Rounding) or 0
 	Slider.Increment = tonumber(info.Increment or info.Step)
+	local stepDecimals = 0
+	if Slider.Increment then
+		local fraction = tostring(Slider.Increment):match("%.(%d+)$")
+		stepDecimals = fraction and #fraction or 0
+	end
+	Slider.Rounding = tonumber(info.Rounding) or stepDecimals
+	Slider.Finished = info.Finished == true
 	Slider.Suffix = info.Suffix or ""
 	Slider.Value = math.clamp(tonumber(info.Default) or Slider.Min, Slider.Min, Slider.Max)
 
@@ -1706,13 +1735,18 @@ function Container:AddSlider(idx, info)
 		return math.clamp(Round(value, Slider.Rounding), Slider.Min, Slider.Max)
 	end
 
+	local pendingEmit = false
 	function Slider:SetValue(value)
 		value = Normalize(value)
 		local changed = value ~= self.Value
 		self.Value = value
 		Render()
 		if changed or not self._initialized then
-			self:_Emit(value)
+			if self.Finished and knobState.Dragging then
+				pendingEmit = true
+			else
+				self:_Emit(value)
+			end
 		end
 	end
 
@@ -1760,6 +1794,10 @@ function Container:AddSlider(idx, info)
 		if knobState.Dragging and IsPointer(input) then
 			knobState.Dragging = false
 			RenderKnob()
+			if pendingEmit then
+				pendingEmit = false
+				Slider:_Emit(Slider.Value)
+			end
 		end
 	end)
 
@@ -1952,7 +1990,7 @@ function Container:AddDropdown(idx, info)
 			Values = self.Values,
 			Multi = self.Multi,
 			Searchable = info.Searchable,
-			MinWidth = math.max(popup.AbsoluteSize.X / window.Scale + 24, 170),
+			MinWidth = math.max(popup.AbsoluteSize.X / window:GetAbsoluteScale() + 24, 170),
 			IsSelected = function(value)
 				if self.Multi then
 					return self.Value[value] == true
@@ -2189,6 +2227,7 @@ function Container:AddKeybind(idx, info)
 			return
 		end
 		Keybind.Picking = true
+		KeyCapture.Active = true
 		Render()
 		local connection
 		connection = UserInputService.InputBegan:Connect(function(input)
@@ -2213,6 +2252,10 @@ function Container:AddKeybind(idx, info)
 			end
 			connection:Disconnect()
 			Keybind.Picking = false
+			-- keep the guard up until every other handler has seen this key press
+			task.delay(0.1, function()
+				KeyCapture.Active = false
+			end)
 			local before = Keybind.Value
 			Keybind.Value = key
 			Render()
@@ -2223,8 +2266,9 @@ function Container:AddKeybind(idx, info)
 		table.insert(row.Connections, connection)
 	end)
 
+	local holding = false
 	row:Connect(UserInputService.InputBegan, function(input)
-		if Keybind.Picking or row.Disabled or UserInputService:GetFocusedTextBox() then
+		if Keybind.Picking or KeyCapture.Active or row.Disabled or UserInputService:GetFocusedTextBox() then
 			return
 		end
 		if Matches(input) then
@@ -2232,12 +2276,14 @@ function Container:AddKeybind(idx, info)
 				Keybind.Toggled = not Keybind.Toggled
 			else
 				Keybind.Toggled = true
+				holding = Keybind.Mode == "Hold"
 			end
 			Keybind:DoClick()
 		end
 	end)
 	row:Connect(UserInputService.InputEnded, function(input)
-		if Keybind.Mode == "Hold" and Matches(input) then
+		if holding and Matches(input) then
+			holding = false
 			Keybind.Toggled = false
 			Spawn(Keybind.Callback, false)
 			clicked:Fire(false)
@@ -2467,7 +2513,7 @@ function Container:AddColorpicker(idx, info)
 				Size = UDim2.new(1, 0, 0, 18),
 				Parent = inner,
 			})
-			List(presets, Enum.FillDirection.Horizontal, 8.5, { VerticalAlignment = Enum.VerticalAlignment.Center })
+			List(presets, Enum.FillDirection.Horizontal, 9, { VerticalAlignment = Enum.VerticalAlignment.Center })
 			for index, name in ipairs(MacUI.AccentOrder) do
 				local color = MacUI.Accents[name]
 				local dot = New("TextButton", {
@@ -2628,8 +2674,9 @@ function Container:AddSegmented(idx, info)
 			return
 		end
 		pill.Visible = true
-		local x = (button.AbsolutePosition.X - control.AbsolutePosition.X) / window.Scale
-		local width = button.AbsoluteSize.X / window.Scale
+		local scale = window:GetAbsoluteScale()
+		local x = (button.AbsolutePosition.X - control.AbsolutePosition.X) / scale
+		local width = button.AbsoluteSize.X / scale
 		local goal = { Position = UDim2.fromOffset(x, 2), Size = UDim2.fromOffset(width, 22) }
 		if duration == 0 or pill.Size.X.Offset == 0 then
 			pill.Position = goal.Position
@@ -3027,6 +3074,12 @@ function MacUI:CreateWindow(config)
 		Parent = ScreenGui,
 	})
 	local RootScale = New("UIScale", { Scale = 1, Parent = Root })
+	local ScaleTween
+
+	-- The scale currently applied on screen (differs from Window.Scale mid-animation).
+	function Window:GetAbsoluteScale()
+		return RootScale.Scale
+	end
 	local WindowShadow = Shadow(Root, 44)
 	local AnimGroup = New("CanvasGroup", {
 		Name = "Transition",
@@ -3039,6 +3092,7 @@ function MacUI:CreateWindow(config)
 	local Holder = New("Frame", {
 		Name = "Holder",
 		Size = UDim2.fromScale(1, 1),
+		Active = true, -- clicks on the window never reach the game world
 		ZIndex = 2,
 		Theme = { BackgroundColor3 = "Background" },
 		Parent = Root,
@@ -3457,7 +3511,7 @@ function MacUI:CreateWindow(config)
 			local bar = New("Frame", {
 				AnchorPoint = Vector2.new(0.5, 0.5),
 				Position = UDim2.fromScale(0.5, 0.5),
-				Size = UDim2.fromOffset(width, 1.5),
+				Size = UDim2.fromOffset(width, 1),
 				Rotation = rotation,
 				BackgroundColor3 = spec.Glyph,
 				BackgroundTransparency = 1,
@@ -3558,6 +3612,10 @@ function MacUI:CreateWindow(config)
 	function Window:SetScale(scale)
 		scale = math.clamp(tonumber(scale) or 1, 0.4, 2)
 		self.Scale = scale
+		if ScaleTween then
+			ScaleTween:Cancel()
+			ScaleTween = nil
+		end
 		RootScale.Scale = scale
 		DockScale.Scale = scale
 		if self._ClosePopup then
@@ -3571,7 +3629,10 @@ function MacUI:CreateWindow(config)
 	end
 
 	local function AutoScale()
-		local viewport = Viewport()
+		local viewport = ScreenGui.AbsoluteSize
+		if viewport.X < 10 or viewport.Y < 10 then
+			viewport = Viewport() - Vector2.new(0, GuiService:GetGuiInset().Y)
+		end
 		local fit = math.min((viewport.X - 32) / size.X, (viewport.Y - 32) / size.Y, 1)
 		return math.max(fit, 0.5)
 	end
@@ -3629,6 +3690,14 @@ function MacUI:CreateWindow(config)
 			Parent = PopupLayer,
 		})
 		popup.Scale = New("UIScale", { Scale = scale * 0.96, Parent = popup.Holder })
+		-- Frames don't sink clicks; without this the dismiss catcher underneath
+		-- would close the popover when clicking its background or colour square.
+		New("TextButton", {
+			Name = "Sink",
+			Size = UDim2.fromScale(1, 1),
+			ZIndex = 1,
+			Parent = popup.Holder,
+		})
 		popup.Shadow = Shadow(popup.Holder, 24, function(t)
 			return popup.Shown and t.ShadowTransparency + 0.2 or 1
 		end)
@@ -3868,7 +3937,7 @@ function MacUI:CreateWindow(config)
 			Pill.Visible = false
 			return
 		end
-		local y = (tab.Button.AbsolutePosition.Y - TabList.AbsolutePosition.Y) / Window.Scale
+		local y = (tab.Button.AbsolutePosition.Y - TabList.AbsolutePosition.Y) / Window:GetAbsoluteScale()
 		local goal = UDim2.fromOffset(10, y)
 		Pill.Visible = true
 		if animate then
@@ -4347,7 +4416,7 @@ function MacUI:CreateWindow(config)
 			RootScale.Scale = Window.Scale * 0.94
 			WindowShadow.ImageTransparency = 1
 			Tween(AnimGroup, { GroupTransparency = 0 }, instant and 0 or 0.28)
-			Tween(RootScale, { Scale = Window.Scale }, instant and 0 or 0.4, Enum.EasingStyle.Quint)
+			ScaleTween = Tween(RootScale, { Scale = Window.Scale }, instant and 0 or 0.4, Enum.EasingStyle.Quint)
 			Tween(WindowShadow, { ImageTransparency = MacUI.ThemeData.ShadowTransparency }, instant and 0 or 0.4)
 			task.delay(instant and 0 or 0.4, function()
 				if id == transitionId then
@@ -4357,7 +4426,7 @@ function MacUI:CreateWindow(config)
 		else
 			BeginTransition()
 			Tween(AnimGroup, { GroupTransparency = 1 }, instant and 0 or 0.22)
-			Tween(RootScale, { Scale = Window.Scale * 0.92 }, instant and 0 or 0.25, Enum.EasingStyle.Quint, Enum.EasingDirection.In)
+			ScaleTween = Tween(RootScale, { Scale = Window.Scale * 0.92 }, instant and 0 or 0.25, Enum.EasingStyle.Quint, Enum.EasingDirection.In)
 			Tween(WindowShadow, { ImageTransparency = 1 }, instant and 0 or 0.2)
 			task.delay(instant and 0 or 0.26, function()
 				if id == transitionId then
@@ -4432,6 +4501,10 @@ function MacUI:CreateWindow(config)
 	Window.SetSubTitle = Window.SetSubtitle
 
 	function Window:SetMinimizeKey(key)
+		if key == "None" or key == false then
+			Window.MinimizeKey = nil
+			return
+		end
 		if type(key) == "string" then
 			local ok, keycode = pcall(function()
 				return Enum.KeyCode[key]
@@ -4584,7 +4657,7 @@ function MacUI:CreateWindow(config)
 		end
 
 		panel:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
-			panelHolder.Size = UDim2.fromOffset(panelWidth, panel.AbsoluteSize.Y / (Window.Scale * panelScale.Scale))
+			panelHolder.Size = UDim2.fromOffset(panelWidth, panel.AbsoluteSize.Y / (RootScale.Scale * panelScale.Scale))
 		end)
 
 		Tween(overlay, { BackgroundTransparency = MacUI.ThemeData.DimTransparency }, 0.2)
@@ -4636,10 +4709,10 @@ function MacUI:CreateWindow(config)
 	end)
 
 	Connect(UserInputService.InputBegan, function(input, processed)
-		if processed or UserInputService:GetFocusedTextBox() then
+		if processed or KeyCapture.Active or UserInputService:GetFocusedTextBox() then
 			return
 		end
-		if input.KeyCode == Window.MinimizeKey then
+		if Window.MinimizeKey and input.KeyCode == Window.MinimizeKey then
 			Window:Toggle()
 		end
 	end)
@@ -4674,6 +4747,9 @@ function MacUI:Destroy()
 		SafeCall(fn)
 	end
 	for _, window in ipairs(self.Windows) do
+		if window._ClosePopup then
+			window:_ClosePopup(true)
+		end
 		for _, connection in ipairs(window.Connections) do
 			connection:Disconnect()
 		end
@@ -4687,9 +4763,6 @@ function MacUI:Destroy()
 		if window.ScreenGui then
 			window.ScreenGui:Destroy()
 		end
-	end
-	for _, connection in ipairs(Connections) do
-		connection:Disconnect()
 	end
 	if NotificationGui then
 		NotificationGui:Destroy()

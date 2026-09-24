@@ -106,18 +106,28 @@ function AccentManager:BuildAccentDropdown(tab, callback)
 end
 
 -- Same as above, but as a colour picker that accepts any colour.
+-- Re-theming every element is expensive, so drag updates are coalesced.
 function AccentManager:BuildAccentPicker(tab, callback)
+	local pending, scheduled = nil, false
 	return self:_Track(tab:AddColorpicker("AccentManager_Color", {
 		Title = "Custom accent",
 		Description = "Pick any colour.",
 		Default = self.CurrentAccent,
 		Callback = function(color)
-			if color ~= self.CurrentAccent then
-				self:ChangeAccent(color)
-				if callback then
-					callback(color)
-				end
+			pending = color
+			if scheduled then
+				return
 			end
+			scheduled = true
+			task.delay(0.12, function()
+				scheduled = false
+				if pending and pending ~= self.CurrentAccent then
+					self:ChangeAccent(pending)
+					if callback then
+						callback(pending)
+					end
+				end
+			end)
 		end,
 	}))
 end
