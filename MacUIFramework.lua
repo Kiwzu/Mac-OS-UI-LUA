@@ -773,21 +773,34 @@ local SHADOW_FADE = 0.11 -- visible fade, as a share of the border
 local SHADOW_EDGE = 0.48 -- the object's edge, measured in from the outside
 
 local function Shadow(parent, spread, transparencyToken)
-	local border = spread / SHADOW_FADE
-	local reach = border * SHADOW_EDGE
-	return New("ImageLabel", {
+	local shadow = New("ImageLabel", {
 		Name = "Shadow",
 		Image = SHADOW_IMAGE,
 		ScaleType = Enum.ScaleType.Slice,
 		SliceCenter = Rect.new(49, 49, 450, 450),
-		SliceScale = border / 49,
 		AnchorPoint = Vector2.new(0.5, 0.5),
-		Position = UDim2.new(0.5, 0, 0.5, math.floor(spread * 0.3 + 0.5)),
-		Size = UDim2.new(1, reach * 2, 1, reach * 2),
 		ZIndex = 0,
 		Theme = { ImageColor3 = "Shadow", ImageTransparency = transparencyToken or "ShadowTransparency" },
 		Parent = parent,
 	})
+	-- The image's corners have to fit inside it. On a small object (a one-item
+	-- menu, an empty Spotlight) full-size corners would be squeezed together
+	-- into a hard dark band, so the shadow shrinks with the object.
+	local function Fit()
+		local size = parent.Size
+		local border = spread / SHADOW_FADE
+		if size.X.Scale == 0 and size.Y.Scale == 0 then
+			local smallest = math.min(size.X.Offset, size.Y.Offset)
+			border = math.clamp(smallest / (2 * (1 - SHADOW_EDGE)), 1, border)
+		end
+		local reach = border * SHADOW_EDGE
+		shadow.SliceScale = border / 49
+		shadow.Size = UDim2.new(1, reach * 2, 1, reach * 2)
+		shadow.Position = UDim2.new(0.5, 0, 0.5, math.floor(border * SHADOW_FADE * 0.3 + 0.5))
+	end
+	Fit()
+	parent:GetPropertyChangedSignal("Size"):Connect(Fit)
+	return shadow
 end
 
 local function IconImage(props)
@@ -1085,9 +1098,8 @@ function MacUI:Notify(config)
 		Parent = NotificationGui,
 	})
 	New("UIScale", { Scale = scale, Parent = holder })
-	local shadow = Shadow(holder, 7, function(t)
-		return banner.Shown and t.ShadowTransparency + 0.15 or 1
-	end)
+	-- no drop shadow: over the game it reads as a dark smudge; the hairline
+	-- border sets the banner apart
 	local card = New("CanvasGroup", {
 		Name = "Card",
 		Size = UDim2.new(1, 0, 0, 0),
@@ -1267,7 +1279,6 @@ function MacUI:Notify(config)
 		LayoutBanners()
 		Tween(holder, { Position = holder.Position + UDim2.fromOffset(width * scale + 40, 0) }, 0.4, Enum.EasingStyle.Quint, Enum.EasingDirection.In)
 		Tween(card, { GroupTransparency = 1 }, 0.35)
-		Restyle(shadow, 0.25)
 		task.delay(0.42, function()
 			holder:Destroy()
 		end)
@@ -1296,7 +1307,6 @@ function MacUI:Notify(config)
 	LayoutBanners()
 	banner.Shown = true
 	Tween(card, { GroupTransparency = 0 }, 0.3)
-	Restyle(shadow, 0.4)
 
 	local duration = config.Duration
 	if duration == nil then
@@ -1382,7 +1392,7 @@ function MacUI:SetWatermark(options)
 		Parent = gui,
 	})
 	New("UIScale", { Scale = NotificationScale(), Parent = holder })
-	Shadow(holder, 6)
+	-- no drop shadow: around a pill it reads as a dark smudge over the game
 	local body = New("Frame", {
 		Name = "Body",
 		Size = UDim2.fromScale(1, 1),
@@ -7550,7 +7560,6 @@ function MacUI:CreateWindow(config)
 		Parent = ScreenGui,
 	})
 	local DockScale = New("UIScale", { Scale = 1, Parent = Dock })
-	Shadow(Dock, 6)
 	local DockBody = New("Frame", {
 		Name = "Body",
 		Size = UDim2.fromScale(1, 1),
@@ -8076,7 +8085,6 @@ function MacUI:CreateWindow(config)
 			if pill then
 				pill.Shown = false
 				Tween(pill.Body, { GroupTransparency = 1 }, 0.2)
-				Restyle(pill.Shadow, 0.2)
 				task.delay(0.21, function()
 					pill.Holder:Destroy()
 				end)
@@ -8094,9 +8102,6 @@ function MacUI:CreateWindow(config)
 				ZIndex = 30,
 				Parent = Main,
 			})
-			pill.Shadow = Shadow(pill.Holder, 4, function(t)
-				return pill.Shown and math.min(t.ShadowTransparency + 0.15, 1) or 1
-			end)
 			pill.Body = New("CanvasGroup", {
 				Name = "Body",
 				Size = UDim2.fromScale(1, 1),
@@ -8144,7 +8149,6 @@ function MacUI:CreateWindow(config)
 			end)
 			pill.StopWidth = stop.Instance.Size.X.Offset
 			Tween(pill.Body, { GroupTransparency = 0 }, 0.2)
-			Restyle(pill.Shadow, 0.2)
 			-- the dot breathes while recording
 			task.spawn(function()
 				while pill.Shown and not MacUI.Unloaded do
@@ -8203,10 +8207,6 @@ function MacUI:CreateWindow(config)
 			Parent = PopupLayer,
 		})
 		local toastScale = New("UIScale", { Scale = scale * 0.9, Parent = holder })
-		local shadow = Shadow(holder, 4, function(t)
-			return toast.Shown and math.min(t.ShadowTransparency + 0.15, 1) or 1
-		end)
-		shadow.ImageTransparency = 1
 		local body = New("CanvasGroup", {
 			Name = "Body",
 			Size = UDim2.fromScale(1, 1),
@@ -8267,7 +8267,6 @@ function MacUI:CreateWindow(config)
 		end
 		Tween(body, { GroupTransparency = 0 }, 0.18)
 		Tween(toastScale, { Scale = scale }, 0.3, Enum.EasingStyle.Back)
-		Restyle(shadow, 0.2)
 		local closed = false
 		function toast.Close(instant)
 			if closed then
@@ -8284,7 +8283,6 @@ function MacUI:CreateWindow(config)
 			end
 			Tween(body, { GroupTransparency = 1 }, 0.25)
 			Tween(toastScale, { Scale = scale * 0.95 }, 0.25)
-			Restyle(shadow, 0.2)
 			task.delay(0.26, function()
 				holder:Destroy()
 			end)
@@ -10570,7 +10568,6 @@ function MacUI:CreateWindow(config)
 				Parent = ScreenGui,
 			})
 			local listScale = New("UIScale", { Scale = Window.Scale, Parent = holder })
-			Shadow(holder, 6)
 			local body = New("Frame", {
 				Name = "Body",
 				Size = UDim2.fromScale(1, 1),
