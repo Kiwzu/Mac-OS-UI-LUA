@@ -1,74 +1,125 @@
---========================================================
--- 🍎 MacUI ThemeManager.lua  (Sonoma Edition)
--- Handles Light/Dark mode, blur transition, and accent sync
---========================================================
+--[[
+	MacUI · AccentManager
+	The eight macOS accent colours plus helpers to switch between them.
 
-local TweenService = game:GetService("TweenService")
+	local AccentManager = loadstring(game:HttpGet(".../AccentManager.lua"))()
+	AccentManager:SetLibrary(MacUI)
+	AccentManager:ChangeAccent("Purple")            -- by name
+	AccentManager:ChangeAccent(Color3.fromRGB(...)) -- or any colour
+	AccentManager:BuildAccentDropdown(Tabs.Settings)
+]]
 
-local ThemeManager = {}
-ThemeManager.__index = ThemeManager
-ThemeManager.CurrentTheme = "Dark"
-
---// Default Theme Palettes
-ThemeManager.Colors = {
-	Dark = {
-		Background = Color3.fromRGB(38, 38, 42),
-		Sidebar = Color3.fromRGB(30, 30, 34),
-		Text = Color3.fromRGB(235, 235, 235),
-		Element = Color3.fromRGB(55, 55, 60)
+local AccentManager = {
+	Library = nil,
+	CurrentName = "Blue",
+	CurrentAccent = Color3.fromRGB(10, 132, 255),
+	Order = { "Blue", "Purple", "Pink", "Red", "Orange", "Yellow", "Green", "Graphite" },
+	Accents = {
+		Blue = Color3.fromRGB(10, 132, 255),
+		Purple = Color3.fromRGB(191, 90, 242),
+		Pink = Color3.fromRGB(255, 55, 95),
+		Red = Color3.fromRGB(255, 69, 58),
+		Orange = Color3.fromRGB(255, 159, 10),
+		Yellow = Color3.fromRGB(255, 204, 0),
+		Green = Color3.fromRGB(48, 209, 88),
+		Graphite = Color3.fromRGB(142, 142, 147),
 	},
-	Light = {
-		Background = Color3.fromRGB(238, 238, 244),
-		Sidebar = Color3.fromRGB(225, 225, 230),
-		Text = Color3.fromRGB(40, 40, 45),
-		Element = Color3.fromRGB(210, 210, 220)
-	}
 }
+AccentManager.__index = AccentManager
 
---// Active Colors table (runtime cache)
-ThemeManager.ThemeColors = ThemeManager.Colors.Dark
-
---// Helper tween
-local function Tween(obj, props)
-	TweenService:Create(obj, TweenInfo.new(0.35, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), props):Play()
+local function NameOf(accents, order, color)
+	for _, name in ipairs(order) do
+		if accents[name] == color then
+			return name
+		end
+	end
+	return "Custom"
 end
 
---// Accent Connection (from AccentManager)
-function ThemeManager:LinkAccent(accentFunc)
-	self.GetAccent = accentFunc
+function AccentManager:SetLibrary(library)
+	self.Library = library
+	self.Accents = library.Accents
+	self.Order = library.AccentOrder
+	self.CurrentAccent = library.Accent
+	self.CurrentName = NameOf(self.Accents, self.Order, library.Accent)
+	library.AccentChanged:Connect(function(color)
+		self.CurrentAccent = color
+		self.CurrentName = NameOf(self.Accents, self.Order, color)
+		for _, control in ipairs(self._controls or {}) do
+			if control.Type == "Dropdown" and self.CurrentName ~= "Custom" and control.Value ~= self.CurrentName then
+				control:SetValue(self.CurrentName)
+			elseif control.Type == "Colorpicker" and control.Value ~= color then
+				control:SetValueRGB(color)
+			end
+		end
+	end)
 end
 
---// Apply Theme instantly
-function ThemeManager:ApplyTheme(mode)
-	mode = mode or "Dark"
-	local target = ThemeManager.Colors[mode]
-	if not target then return end
-	ThemeManager.CurrentTheme = mode
-	ThemeManager.ThemeColors = target
+function AccentManager:_Track(control)
+	self._controls = self._controls or {}
+	table.insert(self._controls, control)
+	return control
 end
 
---// Smooth transition with blur overlay
-function ThemeManager:Transition(rootUI, newMode)
-	newMode = newMode or (self.CurrentTheme == "Dark" and "Light" or "Dark")
-
-	local Fade = Instance.new("Frame", rootUI)
-	Fade.BackgroundColor3 = ThemeManager.ThemeColors.Background
-	Fade.BackgroundTransparency = 1
-	Fade.Size = UDim2.new(1,0,1,0)
-	Fade.ZIndex = 999
-	Tween(Fade, {BackgroundTransparency = 0.1})
-	task.wait(0.15)
-
-	self:ApplyTheme(newMode)
-	Tween(Fade, {BackgroundTransparency = 1})
-	task.wait(0.3)
-	Fade:Destroy()
+function AccentManager:GetAccent()
+	return self.CurrentAccent
 end
 
---// Retrieve a theme color
-function ThemeManager:GetColor(which)
-	local t = self.ThemeColors
-	return t[which] or Color3.fromRGB(255,255,255)
+-- Accepts an accent name ("Purple"), a Color3 or a hex string ("#ff9f0a").
+function AccentManager:ChangeAccent(value)
+	local color = self.Accents[value] or value
+	if type(color) == "string" then
+		local ok, parsed = pcall(Color3.fromHex, color)
+		color = ok and parsed or nil
+	end
+	if typeof(color) ~= "Color3" then
+		warn("[AccentManager] unknown accent: " .. tostring(value))
+		return
+	end
+	if self.Library then
+		if self.Library.Accent ~= color then
+			self.Library:SetAccent(color)
+		end
+	else
+		self.CurrentAccent = color
+		self.CurrentName = self.Accents[value] and value or "Custom"
+	end
+end
+AccentManager.SetAccent = AccentManager.ChangeAccent
+
+-- Adds a dropdown listing the macOS accents. `callback(name)` fires after a change.
+function AccentManager:BuildAccentDropdown(tab, callback)
+	return self:_Track(tab:AddDropdown("AccentManager_Accent", {
+		Title = "Accent colour",
+		Description = "Highlight colour for controls and selections.",
+		Values = self.Order,
+		Default = self.CurrentName ~= "Custom" and self.CurrentName or nil,
+		Callback = function(name)
+			if name and name ~= self.CurrentName then
+				self:ChangeAccent(name)
+				if callback then
+					callback(name)
+				end
+			end
+		end,
+	}))
 end
 
-return ThemeManager
+-- Same as above, but as a colour picker that accepts any colour.
+function AccentManager:BuildAccentPicker(tab, callback)
+	return self:_Track(tab:AddColorpicker("AccentManager_Color", {
+		Title = "Custom accent",
+		Description = "Pick any colour.",
+		Default = self.CurrentAccent,
+		Callback = function(color)
+			if color ~= self.CurrentAccent then
+				self:ChangeAccent(color)
+				if callback then
+					callback(color)
+				end
+			end
+		end,
+	}))
+end
+
+return AccentManager
