@@ -80,7 +80,11 @@ Farm:AddDropdown("Targets", {
 })
 ```
 
-`Example_Main.lua` shows every component in one window.
+`Example_Main.lua` is a finished-looking example hub. `Demo_FullHub.lua` is a tour of the whole API: every function, with each row naming the call it makes. Run it with:
+
+```lua
+loadstring(game:HttpGet("https://raw.githubusercontent.com/Kiwzu/Mac-OS-UI-LUA/refs/heads/main/Demo_FullHub.lua"))()
+```
 
 ---
 

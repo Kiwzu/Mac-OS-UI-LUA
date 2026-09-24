@@ -721,16 +721,27 @@ local function List(parent, direction, padding, props)
 	return layout
 end
 
+-- SHADOW_IMAGE's 49px border is clear on the outside, fades in around the
+-- middle and is solid inside. The object's edge sits in the middle of that
+-- fade (as in Roblox's own examples) so only the soft half shows; the solid
+-- part stays hidden behind the object. `spread` is how far the soft edge
+-- reaches, in pixels. Keep it under about a tenth of the object's smallest
+-- side so the slices fit.
+local SHADOW_FADE = 0.11 -- visible fade, as a share of the border
+local SHADOW_EDGE = 0.48 -- the object's edge, measured in from the outside
+
 local function Shadow(parent, spread, transparencyToken)
+	local border = spread / SHADOW_FADE
+	local reach = border * SHADOW_EDGE
 	return New("ImageLabel", {
 		Name = "Shadow",
 		Image = SHADOW_IMAGE,
 		ScaleType = Enum.ScaleType.Slice,
 		SliceCenter = Rect.new(49, 49, 450, 450),
-		SliceScale = spread / 49,
+		SliceScale = border / 49,
 		AnchorPoint = Vector2.new(0.5, 0.5),
-		Position = UDim2.new(0.5, 0, 0.5, math.floor(spread * 0.25)),
-		Size = UDim2.new(1, spread * 2, 1, spread * 2),
+		Position = UDim2.new(0.5, 0, 0.5, math.floor(spread * 0.3 + 0.5)),
+		Size = UDim2.new(1, reach * 2, 1, reach * 2),
 		ZIndex = 0,
 		Theme = { ImageColor3 = "Shadow", ImageTransparency = transparencyToken or "ShadowTransparency" },
 		Parent = parent,
@@ -975,7 +986,7 @@ function MacUI:Notify(config)
 		Parent = NotificationGui,
 	})
 	New("UIScale", { Scale = scale, Parent = holder })
-	local shadow = Shadow(holder, 26, function(t)
+	local shadow = Shadow(holder, 7, function(t)
 		return banner.Shown and t.ShadowTransparency + 0.15 or 1
 	end)
 	local card = New("CanvasGroup", {
@@ -1723,8 +1734,7 @@ function RowMethods:_RenderShortcut()
 			Name = "Shortcut",
 			TextSize = 11,
 			Weight = Enum.FontWeight.Medium,
-			Size = UDim2.fromOffset(0, 20),
-			AutomaticSize = Enum.AutomaticSize.X,
+			Size = UDim2.fromOffset(24, 20),
 			LayoutOrder = -10,
 			Theme = {
 				BackgroundColor3 = function(t)
@@ -1738,11 +1748,9 @@ function RowMethods:_RenderShortcut()
 			Parent = self.Accessory,
 		})
 		Corner(cap, 5)
-		Padding(cap, 0, 7, 0, 7)
 		self.ShortcutStroke = Stroke(cap, function(t)
 			return self.RecordingShortcut and MacUI.Accent or t.ControlStroke
 		end)
-		New("UISizeConstraint", { MinSize = Vector2.new(24, 20), Parent = cap })
 		cap.MouseButton1Click:Connect(function()
 			if self.Element and not self.Disabled and not self.RecordingShortcut and not JustCaptured() then
 				self.Element:RecordShortcut()
@@ -1753,7 +1761,9 @@ function RowMethods:_RenderShortcut()
 	end
 	if self.ShortcutCap then
 		self.ShortcutCap.Visible = show
-		self.ShortcutCap.Text = self.RecordingShortcut and "Type a key…" or KeyName(key or "")
+		local text = self.RecordingShortcut and "Type a key…" or KeyName(key or "")
+		self.ShortcutCap.Text = text
+		self.ShortcutCap.Size = UDim2.fromOffset(math.max(24, math.ceil(MeasureText(text, 11, Enum.FontWeight.Medium)) + 14), 20)
 		Restyle(self.ShortcutCap, 0.12)
 		Restyle(self.ShortcutStroke, 0.12)
 	end
@@ -1930,8 +1940,9 @@ function PushButton(parent, text, style, height)
 		Text = tostring(text),
 		TextSize = 13,
 		Weight = Enum.FontWeight.Medium,
-		Size = UDim2.fromOffset(0, height or 24),
-		AutomaticSize = Enum.AutomaticSize.X,
+		-- measured rather than AutomaticSize: Roblox adds a UISizeConstraint's
+		-- MinSize before the padding, which made short labels too wide
+		Size = UDim2.fromOffset(math.max(56, math.ceil(MeasureText(text, 13, Enum.FontWeight.Medium)) + 24), height or 24),
 		Theme = {
 			BackgroundColor3 = function(t)
 				local base
@@ -1962,7 +1973,6 @@ function PushButton(parent, text, style, height)
 		Parent = parent,
 	})
 	Corner(button.Instance, 6)
-	Padding(button.Instance, 0, 12, 0, 12)
 	New("UIGradient", {
 		Rotation = 90,
 		Color = ColorSequence.new(Color3.new(1, 1, 1), Color3.fromRGB(234, 234, 234)),
@@ -1971,7 +1981,6 @@ function PushButton(parent, text, style, height)
 	button.Stroke = Stroke(button.Instance, function(t)
 		return button.Style == "Default" and t.ControlStroke or Darken(MacUI.Accent, 0.2)
 	end, 1, 0.35)
-	New("UISizeConstraint", { MinSize = Vector2.new(56, 0), Parent = button.Instance })
 	button.Instance.MouseEnter:Connect(function()
 		button.Hovered = true
 		Restyle(button.Instance, 0.12)
@@ -2855,8 +2864,7 @@ function Container:AddKeybind(idx, info)
 		Name = "KeyCap",
 		TextSize = 13,
 		Weight = Enum.FontWeight.Medium,
-		Size = UDim2.fromOffset(0, 24),
-		AutomaticSize = Enum.AutomaticSize.X,
+		Size = UDim2.fromOffset(58, 24),
 		Theme = {
 			BackgroundColor3 = function(t)
 				return capState.Hovered and t.ControlHover or t.Control
@@ -2868,14 +2876,13 @@ function Container:AddKeybind(idx, info)
 		Parent = row.Accessory,
 	})
 	Corner(cap, 6)
-	Padding(cap, 0, 10, 0, 10)
 	local capStroke = Stroke(cap, function(t)
 		return Keybind.Picking and MacUI.Accent or t.ControlStroke
 	end)
-	New("UISizeConstraint", { MinSize = Vector2.new(58, 24), Parent = cap })
 
 	local function Render()
 		cap.Text = Keybind.Picking and "Press a key…" or KeyName(Keybind.Value)
+		cap.Size = UDim2.fromOffset(math.max(58, math.ceil(MeasureText(cap.Text, 13, Enum.FontWeight.Medium)) + 20), 24)
 		Restyle(cap, 0.12)
 		Restyle(capStroke, 0.12)
 		capStroke.Thickness = Keybind.Picking and 2 or 1
@@ -4171,7 +4178,9 @@ end
 function TabMethods:SetBadge(value)
 	local text = value ~= nil and value ~= false and value ~= 0 and tostring(value) or nil
 	self.Badge.Visible = text ~= nil
-	self.BadgeLabel.Text = text or ""
+	self.Badge.Text = text or ""
+	-- a circle for one digit, a pill for more
+	self.Badge.Size = UDim2.fromOffset(math.max(18, math.ceil(MeasureText(text or "", 11, Enum.FontWeight.Bold)) + 12), 18)
 end
 
 --------------------------------------------------------------------------------
@@ -4390,12 +4399,12 @@ function MacUI:CreateWindow(config)
 	function Window:GetAbsoluteScale()
 		return RootScale.Scale
 	end
-	local WindowShadow = Shadow(Root, 58, function(t)
+	local WindowShadow = Shadow(Root, 24, function(t)
 		return Window.Shown and t.ShadowTransparency or 1
 	end)
 	WindowShadow.Name = "AmbientShadow"
 	WindowShadow.ImageTransparency = 1
-	local ContactShadow = Shadow(Root, 14, function(t)
+	local ContactShadow = Shadow(Root, 3, function(t)
 		return Window.Shown and math.min(t.ShadowTransparency + 0.25, 1) or 1
 	end)
 	ContactShadow.Name = "ContactShadow"
@@ -5022,7 +5031,7 @@ function MacUI:CreateWindow(config)
 		Parent = ScreenGui,
 	})
 	local DockScale = New("UIScale", { Scale = 1, Parent = Dock })
-	Shadow(Dock, 20)
+	Shadow(Dock, 6)
 	local DockBody = New("Frame", {
 		Name = "Body",
 		Size = UDim2.fromScale(1, 1),
@@ -5163,7 +5172,7 @@ function MacUI:CreateWindow(config)
 			ZIndex = 1,
 			Parent = popup.Holder,
 		})
-		popup.Shadow = Shadow(popup.Holder, 24, function(t)
+		popup.Shadow = Shadow(popup.Holder, 4, function(t)
 			return popup.Shown and t.ShadowTransparency + 0.2 or 1
 		end)
 		popup.Canvas = New("CanvasGroup", {
@@ -5576,7 +5585,7 @@ function MacUI:CreateWindow(config)
 			Parent = PopupLayer,
 		})
 		local toastScale = New("UIScale", { Scale = scale * 0.9, Parent = holder })
-		local shadow = Shadow(holder, 22, function(t)
+		local shadow = Shadow(holder, 4, function(t)
 			return toast.Shown and math.min(t.ShadowTransparency + 0.15, 1) or 1
 		end)
 		shadow.ImageTransparency = 1
@@ -5812,30 +5821,24 @@ function MacUI:CreateWindow(config)
 			},
 			Parent = button,
 		})
-		tab.Badge = New("Frame", {
+		tab.Badge = New("TextLabel", {
 			Name = "Badge",
+			Text = "",
+			TextSize = 11,
+			Weight = Enum.FontWeight.Bold,
 			AnchorPoint = Vector2.new(1, 0.5),
 			Position = UDim2.new(1, -6, 0.5, 0),
-			Size = UDim2.fromOffset(0, 18),
-			AutomaticSize = Enum.AutomaticSize.X,
+			Size = UDim2.fromOffset(18, 18),
+			TextXAlignment = Enum.TextXAlignment.Center,
+			TextColor3 = Color3.new(1, 1, 1),
+			BackgroundTransparency = 0,
 			BackgroundColor3 = rgb(255, 69, 58),
 			Visible = false,
 			ZIndex = 3,
 			Parent = button,
 		})
 		Corner(tab.Badge, 9)
-		Padding(tab.Badge, 0, 6, 0, 6)
-		New("UISizeConstraint", { MinSize = Vector2.new(18, 18), Parent = tab.Badge })
-		tab.BadgeLabel = New("TextLabel", {
-			Text = "",
-			TextSize = 11,
-			Weight = Enum.FontWeight.Bold,
-			Size = UDim2.fromOffset(0, 18),
-			AutomaticSize = Enum.AutomaticSize.X,
-			TextXAlignment = Enum.TextXAlignment.Center,
-			TextColor3 = Color3.new(1, 1, 1),
-			Parent = tab.Badge,
-		})
+		tab.BadgeLabel = tab.Badge
 		if info.Badge then
 			tab:SetBadge(info.Badge)
 		end
@@ -6464,6 +6467,9 @@ function MacUI:CreateWindow(config)
 	function Window:Dialog(options)
 		options = options or {}
 		Window:_ClosePopup(true)
+		if Window.CloseSpotlight then
+			Window:CloseSpotlight() -- the dialog needs to be on top
+		end
 		local dialog = { Closed = false }
 		local overlay = New("TextButton", {
 			Name = "Dialog",
@@ -6485,7 +6491,7 @@ function MacUI:CreateWindow(config)
 			Parent = overlay,
 		})
 		local panelScale = New("UIScale", { Scale = 1.08, Parent = panelHolder })
-		local panelShadow = Shadow(panelHolder, 30, function(t)
+		local panelShadow = Shadow(panelHolder, 12, function(t)
 			return dialog.Closed and 1 or t.ShadowTransparency
 		end)
 		panelShadow.ImageTransparency = 1
@@ -6849,7 +6855,7 @@ function MacUI:CreateWindow(config)
 		})
 		local panelScale = New("UIScale", { Scale = scale * 0.96, Parent = holder })
 		local sink = New("TextButton", { Name = "Sink", Size = UDim2.fromScale(1, 1), ZIndex = 1, Parent = holder })
-		local shadow = Shadow(holder, 40, function(t)
+		local shadow = Shadow(holder, 10, function(t)
 			return Spotlight.Open and t.ShadowTransparency or 1
 		end)
 		shadow.ImageTransparency = 1
@@ -7288,7 +7294,7 @@ function MacUI:CreateWindow(config)
 				Parent = ScreenGui,
 			})
 			local listScale = New("UIScale", { Scale = Window.Scale, Parent = holder })
-			Shadow(holder, 18)
+			Shadow(holder, 6)
 			local body = New("Frame", {
 				Name = "Body",
 				Size = UDim2.fromScale(1, 1),
