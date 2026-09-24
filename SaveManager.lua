@@ -222,6 +222,7 @@ function SaveManager:IgnoreThemeSettings()
 		"InterfaceScale",
 		"InterfaceAcrylic",
 		"InterfaceReduceMotion",
+		"InterfacePerformanceGuard",
 		"InterfaceShortcutList",
 		"InterfaceRememberWindow",
 		"MenuKeybind",
@@ -263,8 +264,13 @@ end
 
 -- Applies a decoded profile.
 function SaveManager:_Apply(decoded)
-	-- changes made while loading shouldn't trigger an autosave
+	-- changes made while loading shouldn't trigger an autosave, or count
+	-- towards Spotlight's suggestions
 	self.Loading = true
+	local library = self.Library
+	if library then
+		library._LoadingProfile = true
+	end
 	for _, entry in ipairs(decoded.objects or {}) do
 		local parser = self.Parser[entry.type]
 		if parser and not self:IsIgnored(entry.idx) then
@@ -273,6 +279,9 @@ function SaveManager:_Apply(decoded)
 	end
 	task.defer(function()
 		self.Loading = false
+		if library then
+			library._LoadingProfile = false
+		end
 	end)
 end
 

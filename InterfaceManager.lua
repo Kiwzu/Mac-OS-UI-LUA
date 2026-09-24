@@ -121,11 +121,20 @@ function InterfaceManager:BuildInterfaceSection(tab)
 			settings.Accent = name
 		end
 	end
-	settings.ReduceMotion = library.ReduceMotion == true
+	-- (the Get* versions ignore effects the performance guard has paused)
+	if library.GetReduceMotion then
+		settings.ReduceMotion = library:GetReduceMotion()
+	else
+		settings.ReduceMotion = library.ReduceMotion == true
+	end
 	settings.PerformanceGuard = library.PerformanceGuard == true
 	local first = library.Windows and library.Windows[1]
 	if first then
-		settings.Acrylic = first.Acrylic == true
+		if first.GetAcrylic then
+			settings.Acrylic = first:GetAcrylic()
+		else
+			settings.Acrylic = first.Acrylic == true
+		end
 		settings.ShortcutList = first.KeybindListVisible == true
 		settings.MenuKeybind = first.MinimizeKey and first.MinimizeKey.Name or "None"
 		settings.Scale = math.clamp(math.floor((first.Scale or 1) * 20 + 0.5) * 5, 60, 130)

@@ -966,19 +966,24 @@ MacroSection:AddButton({
 
 local Typing = Tabs.Automation:AddSection({
 	Title = "Type to control",
-	Description = "Spotlight understands a setting followed by a value. Try one:",
+	Description = "Spotlight understands a setting followed by a value, like “volume 80” or “lights on in 30s”.",
 	Icon = "wand-2",
 })
-for _, example in ipairs({ "volume 80", "lights on", "music on in 30s", "collect reward every 5s", "reset volume", "light mode" }) do
-	Typing:AddButton({
-		Title = "“" .. example .. "”",
-		Description = "Window:OpenSpotlight(text) opens Spotlight with this typed in.",
-		ButtonText = "Try",
-		Callback = function()
-			Window:OpenSpotlight(example)
-		end,
-	})
-end
+-- the examples live in a menu (not in row titles) so Spotlight doesn't find
+-- this row when you type one of them
+Typing:AddDropdown("DemoTypeExample", {
+	Title = "Example",
+	Values = { "volume 80", "lights on", "music on in 30s", "collect reward every 5s", "reset volume", "dark mode" },
+	Default = "volume 80",
+})
+Typing:AddButton({
+	Title = "Window:OpenSpotlight(text)",
+	Description = "Opens Spotlight with the example typed in. Press Enter to run it.",
+	ButtonText = "Try",
+	Callback = function()
+		Window:OpenSpotlight(Options.DemoTypeExample.Value)
+	end,
+})
 
 local Learning = Tabs.Automation:AddSection({
 	Title = "Suggestions",
@@ -1038,21 +1043,13 @@ Inspector:AddButton({
 
 local GuardSection = Tabs.Automation:AddSection({
 	Title = "Frame-rate guard",
-	Description = "CreateWindow({ PerformanceGuard = true }): below 30 fps, blur and animations pause until the game catches up.",
+	Description = "CreateWindow({ PerformanceGuard = true }): below 30 fps, blur and animations pause until the game catches up. Switch it under Appearance › Protect frame rate.",
 	Icon = "gauge",
 })
-local GuardStatus = GuardSection:AddLabel({ Title = "Effects", Value = "Running" })
+local GuardStatus = GuardSection:AddLabel({ Title = "MacUI.PerformanceChanged", Description = "Whether effects are paused right now.", Value = "Running" })
 MacUI.PerformanceChanged:Connect(function(paused)
 	GuardStatus:SetValue(paused and "Paused (low frame rate)" or "Running")
 end)
-GuardSection:AddToggle("DemoGuard", {
-	Title = "MacUI:SetPerformanceGuard",
-	Description = "Also under Appearance › Protect frame rate.",
-	Default = true,
-	Callback = function(on)
-		MacUI:SetPerformanceGuard(on)
-	end,
-})
 
 --------------------------------------------------------------------------------
 -- Window

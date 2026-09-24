@@ -394,6 +394,15 @@ end
 -- trigger other keybinds or the window's show/hide key.
 local KeyCapture = { Active = false, Token = 0, EndedAt = -1 }
 
+-- When the user last clicked or typed in the interface (not the game), and
+-- whether a press that began on it is still held. Only that counts as the
+-- user's own change for undo, macros and suggestions: walking, turning the
+-- camera or a script acting on its own doesn't.
+local Activity = { Last = -1, Pressing = false }
+local function MarkActivity()
+	Activity.Last = os.clock()
+end
+
 -- Records the next key press. `done(key)` receives a KeyCode name, "MB2"/"MB3"
 -- (keyboard-only captures treat those as cancel), "None" (Backspace/Delete
 -- clears) or false (Escape or a click cancels). Returns a handle whose
@@ -440,6 +449,7 @@ local function CaptureKey(done, keyboardOnly)
 			return
 		end
 		Finish()
+		MarkActivity()
 		done(key)
 	end)
 	local handle = {}
@@ -993,6 +1003,15 @@ function MacUI:SetReduceMotion(enabled)
 		return
 	end
 	self.ReduceMotion = enabled == true
+end
+
+-- The reduce-motion setting as the user chose it, even while the performance
+-- guard has effects paused.
+function MacUI:GetReduceMotion()
+	if Guard.Engaged and Guard.Saved then
+		return Guard.Saved.ReduceMotion == true
+	end
+	return self.ReduceMotion == true
 end
 
 -- Copies text with the executor's clipboard function. Returns false if there is none.
@@ -1801,7 +1820,8 @@ local function ParseDuration(text, defaultUnit)
 	end
 	local h, m, s = text:match("^(%d+):(%d%d):(%d%d)$")
 	if h then
-		return tonumber(h) * 3600 + tonumber(m) * 60 + tonumber(s)
+		local total = tonumber(h) * 3600 + tonumber(m) * 60 + tonumber(s)
+		return total > 0 and total or nil
 	end
 	m, s = text:match("^(%d+):(%d%d)$")
 	if m then
@@ -1870,7 +1890,8 @@ local function EnsureTimerLoop()
 			for row, timer in pairs(table.clone(ActiveTimers)) do
 				if row.Destroyed then
 					ActiveTimers[row] = nil
-				elseif now >= timer.Ends then
+				elseif ActiveTimers[row] == timer and now >= timer.Ends then
+					-- (another timer firing this tick may have cancelled it)
 					SafeCall(timer.Fire, timer)
 				end
 				if ActiveTimers[row] == timer then
@@ -2181,6 +2202,7 @@ function RowMethods:Destroy()
 		self.Capture:Disconnect()
 		self.Capture = nil
 	end
+	self.Timer = nil
 	if ActiveTimers[self] then
 		ActiveTimers[self] = nil
 		MacUI.TimersChanged:Fire()
@@ -2852,6 +2874,7 @@ function ElementBase:SetShortcut(key)
 				return
 			end
 			if KeyMatches(input, key) and self._Activate then
+				MarkActivity()
 				self:_Activate(true)
 			end
 		end)
@@ -2915,7 +2938,7 @@ local UNDOABLE = {
 	Stepper = true,
 	Radio = true,
 }
-local History = { Undo = {}, Redo = {}, Busy = false, LastInput = -1, Limit = 100 }
+local History = { Undo = {}, Redo = {}, Busy = false, Limit = 100 }
 local Snapshots = setmetatable({}, { __mode = "k" })
 
 -- Timers and macros change things through AutomationApply: not undoable, and
@@ -2935,6 +2958,14 @@ local function AutomationApply(fn, ...)
 	end
 end
 
+-- Stands in for a nil value (a cleared menu), so "no snapshot yet" and "empty"
+-- aren't confused.
+local NIL_VALUE = setmetatable({}, {
+	__tostring = function()
+		return "nil"
+	end,
+})
+
 local function Snapshot(element)
 	if element.Type == "Colorpicker" then
 		return { Color = element.Value, Transparency = element.Transparency }
@@ -2943,11 +2974,17 @@ local function Snapshot(element)
 	elseif element.Type == "Dropdown" and element.Multi then
 		return element:GetActiveValues()
 	end
-	return CopyValue(element.Value)
+	local value = CopyValue(element.Value)
+	if value == nil then
+		return NIL_VALUE
+	end
+	return value
 end
 
 local function RestoreSnapshot(element, snapshot)
-	if element.Type == "Colorpicker" then
+	if snapshot == NIL_VALUE then
+		element:SetValue(nil)
+	elseif element.Type == "Colorpicker" then
 		element.Transparency = snapshot.Transparency
 		element:SetValueRGB(snapshot.Color)
 	elseif element.Type == "Keybind" then
@@ -2957,11 +2994,10 @@ local function RestoreSnapshot(element, snapshot)
 	end
 end
 
--- The user is interacting: a button is held, or they clicked or typed a moment ago.
+-- The user is using the interface: they clicked or typed in it a moment ago,
+-- or are still holding a press that began on it (see Activity).
 local function UserActive()
-	return os.clock() - History.LastInput < 0.5
-		or UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)
-		or UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
+	return os.clock() - Activity.Last < 0.5 or Activity.Pressing
 end
 
 local function RecordChange(element, before, after)
@@ -3001,18 +3037,6 @@ local function RecordChange(element, before, after)
 	table.clear(History.Redo)
 end
 
-MacUI.OptionChanged:Connect(function(_, _, element)
-	if type(element) ~= "table" or not UNDOABLE[element.Type] then
-		return
-	end
-	local before = Snapshots[element]
-	local after = Snapshot(element)
-	Snapshots[element] = after
-	if before == nil or History.Busy or not MacUI.UndoEnabled or SameValue(before, after) or not UserActive() then
-		return
-	end
-	RecordChange(element, before, after)
-end)
 
 --------------------------------------------------------------------------------
 -- Usage: what the user reaches for, so Spotlight can suggest it ("frecency":
@@ -3069,12 +3093,6 @@ local function Frecency(key)
 	return entry.Count * weight
 end
 
-MacUI.OptionChanged:Connect(function(_, _, element)
-	if type(element) == "table" and UNDOABLE[element.Type] and Automation.Depth == 0 and UserActive() then
-		NoteUsage(UsageKey(element))
-	end
-end)
-
 -- Usage as a plain table (to save); SetUsage merges a saved one back in.
 function MacUI:GetUsage()
 	local copy = {}
@@ -3097,6 +3115,7 @@ function MacUI:SetUsage(data)
 			end
 		end
 	end
+	self.UsageChanged:Fire()
 end
 
 function MacUI:ClearUsage()
@@ -3104,16 +3123,30 @@ function MacUI:ClearUsage()
 	self.UsageChanged:Fire()
 end
 
--- Macro recording: the user's own changes to indexed controls.
+-- One listener for undo, macro recording and suggestions, so all three agree
+-- on what counts: a real change of value that the user made.
 MacUI.OptionChanged:Connect(function(_, _, element)
-	local recorder = Macros.Recorder
-	if not recorder or type(element) ~= "table" or not UNDOABLE[element.Type] then
+	if type(element) ~= "table" or not UNDOABLE[element.Type] then
 		return
+	end
+	local before = Snapshots[element]
+	local after = Snapshot(element)
+	Snapshots[element] = after
+	if before == nil or SameValue(before, after) then
+		return -- nothing changed (a new shortcut, say)
 	end
 	if Automation.Depth > 0 or not UserActive() then
-		return
+		return -- a script, a timer or a macro did it
 	end
-	recorder:_Capture(element, Snapshot(element))
+	if not History.Busy and MacUI.UndoEnabled then
+		RecordChange(element, before, after)
+	end
+	if Macros.Recorder then
+		Macros.Recorder:_Capture(element, after)
+	end
+	if not MacUI._LoadingProfile then
+		NoteUsage(UsageKey(element))
+	end
 end)
 
 local function ReplayHistory(fromStack, toStack, field, verb, icon)
@@ -3207,19 +3240,19 @@ local function EnsureLibraryInput()
 	if #LibraryConnections > 0 then
 		return
 	end
-	local function Mark(input)
-		local kind = input.UserInputType
-		if
-			kind == Enum.UserInputType.MouseButton1
-			or kind == Enum.UserInputType.MouseButton2
-			or kind == Enum.UserInputType.Touch
-			or kind == Enum.UserInputType.Keyboard
-		then
-			History.LastInput = os.clock()
-		end
-	end
+	local POINTERS = {
+		[Enum.UserInputType.MouseButton1] = true,
+		[Enum.UserInputType.Touch] = true,
+	}
 	table.insert(LibraryConnections, UserInputService.InputBegan:Connect(function(input, processed)
-		Mark(input)
+		local kind = input.UserInputType
+		-- only input the interface took: clicks on it and typing in its fields
+		if processed and (POINTERS[kind] or kind == Enum.UserInputType.MouseButton2 or kind == Enum.UserInputType.Keyboard) then
+			MarkActivity()
+			if POINTERS[kind] then
+				Activity.Pressing = true
+			end
+		end
 		if input.KeyCode ~= Enum.KeyCode.Z and input.KeyCode ~= Enum.KeyCode.Y then
 			return
 		end
@@ -3227,13 +3260,19 @@ local function EnsureLibraryInput()
 			return
 		end
 		local shift = UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) or UserInputService:IsKeyDown(Enum.KeyCode.RightShift)
+		MarkActivity() -- a recording macro sees what the undo changes
 		if input.KeyCode == Enum.KeyCode.Y or shift then
 			MacUI:Redo()
 		else
 			MacUI:Undo()
 		end
 	end))
-	table.insert(LibraryConnections, UserInputService.InputEnded:Connect(Mark))
+	table.insert(LibraryConnections, UserInputService.InputEnded:Connect(function(input)
+		if Activity.Pressing and POINTERS[input.UserInputType] then
+			Activity.Pressing = false
+			MarkActivity() -- a slider that reports on release does so now
+		end
+	end))
 end
 
 local function Register(idx, element)
@@ -3801,6 +3840,7 @@ function Container:AddSlider(idx, info)
 	end
 
 	local function SetFromPointer(x)
+		MarkActivity()
 		local alpha = math.clamp((x - bar.AbsolutePosition.X) / math.max(bar.AbsoluteSize.X, 1), 0, 1)
 		Slider:SetValue(Slider.Min + (Slider.Max - Slider.Min) * alpha)
 	end
@@ -3846,6 +3886,7 @@ function Container:AddSlider(idx, info)
 		Themed(boxStroke, { Color = "Accent" })
 	end)
 	box.FocusLost:Connect(function()
+		MarkActivity()
 		Themed(boxStroke, { Color = "FieldStroke" })
 		local number = tonumber((box.Text:gsub("[^%d%.%-]", "")))
 		if number then
@@ -4223,6 +4264,7 @@ function Container:AddInput(idx, info)
 		Tween(stroke, { Thickness = 2 }, 0.15)
 	end)
 	box.FocusLost:Connect(function(enterPressed)
+		MarkActivity()
 		Themed(stroke, { Color = "FieldStroke" })
 		Tween(stroke, { Thickness = 1 }, 0.15)
 		if Input.Finished and (enterPressed or info.FinishOnFocusLost) then
@@ -4661,6 +4703,7 @@ function Container:AddColorpicker(idx, info)
 
 			local dragging
 			local function Update(position)
+				MarkActivity()
 				if dragging == "sv" then
 					local s = math.clamp((position.X - sv.AbsolutePosition.X) / sv.AbsoluteSize.X, 0, 1)
 					local v = 1 - math.clamp((position.Y - sv.AbsolutePosition.Y) / sv.AbsoluteSize.Y, 0, 1)
@@ -4701,6 +4744,7 @@ function Container:AddColorpicker(idx, info)
 				Themed(hexStroke, { Color = "Accent" })
 			end)
 			hexBox.FocusLost:Connect(function()
+				MarkActivity()
 				Themed(hexStroke, { Color = "FieldStroke" })
 				local text = hexBox.Text:gsub("#", ""):gsub("%s", "")
 				local ok, color = pcall(Color3.fromHex, text)
@@ -5072,6 +5116,7 @@ function Container:AddStepper(idx, info)
 		Themed(boxStroke, { Color = "Accent" })
 	end)
 	box.FocusLost:Connect(function()
+		MarkActivity()
 		Themed(boxStroke, { Color = "FieldStroke" })
 		local number = tonumber((box.Text:gsub("[^%d%.%-]", "")))
 		if number then
@@ -5842,29 +5887,56 @@ function Container:AddTable(idx, info)
 end
 Container.AddList = Container.AddTable
 
--- Macro steps are saved by index (or "Page/Title" for controls without one).
+local function SectionTitle(row)
+	local block = row.Group and row.Group.Block
+	return block and block.Title and tostring(block.Title) or ""
+end
+
+-- How a macro step finds its control again: by index, or else by page,
+-- section, title and which of any same-titled controls it is.
 local function MacroKey(element)
 	if element.Idx ~= nil then
 		return { i = element.Idx }
 	end
-	local tab = element.Row and element.Row.Tab
-	return { p = (tab and tab.Title or "") .. "/" .. tostring(element.Title or "") }
+	local row = element.Row
+	local tab = row and row.Tab
+	local section = row and SectionTitle(row) or ""
+	local title = tostring(element.Title or "")
+	local nth = 0
+	for _, other in ipairs(tab and tab.Rows or {}) do
+		if other.Element and tostring(other.Element.Title or "") == title and SectionTitle(other) == section then
+			nth += 1
+			if other == row then
+				break
+			end
+		end
+	end
+	return { t = tab and tab.Title or "", s = section, n = title, k = math.max(nth, 1) }
 end
 
 local function FindMacroTarget(step)
 	if step.i ~= nil then
 		return MacUI.Options[step.i]
 	end
-	local tabTitle, title = tostring(step.p or ""):match("^(.-)/(.*)$")
-	if not tabTitle then
+	local tabTitle, section, title = step.t, step.s, step.n
+	local nth = tonumber(step.k) or 1
+	if tabTitle == nil and step.p then
+		tabTitle, title = tostring(step.p):match("^(.*)/(.-)$") -- older "Page/Title" keys
+	end
+	if tabTitle == nil or title == nil then
 		return nil
 	end
 	for _, window in ipairs(MacUI.Windows) do
 		for _, tab in ipairs(window.Tabs or {}) do
 			if tab.Title == tabTitle then
+				local seen = 0
 				for _, row in ipairs(tab.Rows) do
-					if row.Element and tostring(row.Element.Title or "") == title then
-						return row.Element
+					local element = row.Element
+					if element and tostring(element.Title or "") == title and (section == nil or SectionTitle(row) == section) then
+						seen += 1
+						if seen == nth then
+							return element
+						end
 					end
 				end
 			end
@@ -5874,7 +5946,9 @@ local function FindMacroTarget(step)
 end
 
 local function EncodeSnapshot(element, snapshot)
-	if element.Type == "Colorpicker" then
+	if snapshot == NIL_VALUE then
+		return { none = true }
+	elseif element.Type == "Colorpicker" then
 		return { color = snapshot.Color:ToHex(), alpha = snapshot.Transparency }
 	elseif element.Type == "Keybind" then
 		return { key = snapshot.Key, mode = snapshot.Mode }
@@ -5883,7 +5957,9 @@ local function EncodeSnapshot(element, snapshot)
 end
 
 local function DecodeSnapshot(element, value)
-	if element.Type == "Colorpicker" then
+	if type(value) == "table" and value.none == true then
+		return NIL_VALUE
+	elseif element.Type == "Colorpicker" then
 		local ok, color = pcall(Color3.fromHex, tostring(type(value) == "table" and value.color or ""))
 		return ok and { Color = color, Transparency = value.alpha } or nil
 	elseif element.Type == "Keybind" then
@@ -6080,7 +6156,7 @@ function Container:AddMacro(idx, info)
 		UpdateStatus()
 	end
 
-	function Macro:StopRecording()
+	function Macro:StopRecording(silent)
 		if not self.Recording then
 			return
 		end
@@ -6096,7 +6172,7 @@ function Container:AddMacro(idx, info)
 			steps[1].Delay = math.min(steps[1].Delay, 0.3)
 			self.Steps = steps
 			Changed()
-		elseif not row.Destroyed then
+		elseif not row.Destroyed and not silent then
 			row.Window:Toast("Nothing recorded", { Detail = "change a setting while recording", Icon = "circle-dot" })
 		end
 		Render()
@@ -6129,7 +6205,9 @@ function Container:AddMacro(idx, info)
 		if loop == nil then
 			loop = self.Loop
 		end
-		local speed = math.clamp(tonumber(options.Speed) or self.Speed, 0.1, 10)
+		-- read on every step, so SetLoop / SetSpeed apply to a playback in progress
+		self._loop = loop
+		self._speed = math.clamp(tonumber(options.Speed) or self.Speed, 0.1, 10)
 		self.Playing = true
 		self.Run = 1
 		self.Position = 1
@@ -6145,7 +6223,7 @@ function Container:AddMacro(idx, info)
 					self.Position = index
 					UpdateStatus()
 					if step.Delay > 0 then
-						task.wait(step.Delay / speed)
+						task.wait(step.Delay / self._speed)
 					end
 					if token ~= playToken or MacUI.Unloaded or row.Destroyed then
 						return
@@ -6153,8 +6231,8 @@ function Container:AddMacro(idx, info)
 					ApplyStep(step)
 				end
 				-- always yield between runs, even for a recording with no pauses
-				task.wait(math.max(0.25 / speed, 0.03))
-			until not loop or token ~= playToken or MacUI.Unloaded or row.Destroyed
+				task.wait(math.max(0.25 / self._speed, 0.03))
+			until not self._loop or token ~= playToken or MacUI.Unloaded or row.Destroyed
 			if token == playToken and not row.Destroyed then
 				self.Playing = false
 				Render()
@@ -6192,13 +6270,23 @@ function Container:AddMacro(idx, info)
 
 	function Macro:SetLoop(loop)
 		self.Loop = loop == true
+		self._loop = self.Loop
 		UpdateStatus()
 		Changed()
 	end
 
 	function Macro:SetSpeed(speed)
 		self.Speed = math.clamp(tonumber(speed) or 1, 0.1, 10)
+		self._speed = self.Speed
 		Changed()
+	end
+
+	function Macro:Destroy()
+		if self.Recording then
+			self:StopRecording(true)
+		end
+		self:Stop()
+		ElementBase.Destroy(self)
 	end
 
 	-- A plain table (JSON-safe) with the steps, loop and speed.
@@ -6806,7 +6894,8 @@ function MacUI:SetPerformanceGuard(options)
 	options = type(options) == "table" and options or {}
 	Guard.Enabled = true
 	self.PerformanceGuard = true
-	Guard.MinFps = math.max(tonumber(options.MinFps) or 30, 1)
+	-- at most 50, so recovering (MinFps + 8) stays reachable on a 60 fps cap
+	Guard.MinFps = math.clamp(tonumber(options.MinFps) or 30, 1, 50)
 	Guard.Notify = options.Notify ~= false
 	local frames, elapsed, slow, fast = 0, 0, 0, 0
 	Guard.Connection = RunService.Heartbeat:Connect(function(dt)
@@ -9026,7 +9115,9 @@ function MacUI:CreateWindow(config)
 
 	function Window:SetAcrylic(enabled)
 		if Guard.Engaged and not Guard.Applying and Guard.Saved then
+			-- effects are paused: remember the choice for when they come back
 			Guard.Saved.Acrylic[Window] = (enabled == true) or nil
+			return enabled == true and AcrylicSupported()
 		end
 		enabled = enabled == true and AcrylicSupported()
 		Window.Acrylic = enabled
@@ -9048,6 +9139,14 @@ function MacUI:CreateWindow(config)
 			Window.Blur:SetEnabled(Window.Acrylic and Window.Shown and not Window.Minimized)
 		end
 		return Window.Acrylic
+	end
+
+	-- Frosted glass as the user set it, even while the performance guard has it paused.
+	function Window:GetAcrylic()
+		if Guard.Engaged and Guard.Saved then
+			return Guard.Saved.Acrylic[Window] == true
+		end
+		return Window.Acrylic == true
 	end
 
 	function Window:SetTitle(text)
@@ -9498,28 +9597,34 @@ function MacUI:CreateWindow(config)
 		return (section and section ~= "") and (tab.Title .. " › " .. section) or tab.Title
 	end
 
-	-- Enabled controls whose title (or description and keywords) match `name`.
+	-- The controls a phrase names. Only title matches of a whole word or more
+	-- count, and only the best of them: Enter runs the first action, so a
+	-- partial match ("lights" in "Highlights") must never become one.
 	local function FindControls(name)
-		local found = {}
+		local found, best = {}, 0
 		if #name < 2 then
 			return found
 		end
-		for _, tab in ipairs(Window.Tabs) do
-			for _, row in ipairs(tab.Rows) do
+		for tabIndex, tab in ipairs(Window.Tabs) do
+			for rowIndex, row in ipairs(tab.Rows) do
 				if row.Element and row.Title ~= "" and not row.Destroyed and not row.Disabled and row:_IsShown() then
-					local score = Score({
-						TitleLower = row.Title:lower(),
-						Search = (row.Description .. " " .. row.Keywords):lower(),
-					}, name)
-					if score >= 50 or (score > 0 and #name >= 3) then
-						table.insert(found, { Element = row.Element, Row = row, Tab = tab, Score = score })
+					local score = Score({ TitleLower = row.Title:lower(), Search = "" }, name)
+					if score >= 80 and score >= best then
+						if score > best then
+							table.clear(found)
+							best = score
+						end
+						table.insert(found, {
+							Element = row.Element,
+							Row = row,
+							Tab = tab,
+							Score = score,
+							Order = tabIndex * 10000 + rowIndex,
+						})
 					end
 				end
 			end
 		end
-		table.sort(found, function(a, b)
-			return a.Score > b.Score
-		end)
 		return found
 	end
 
@@ -9598,6 +9703,7 @@ function MacUI:CreateWindow(config)
 			end,
 			ValueText = valueText,
 			Score = match.Score,
+			Order = match.Order,
 			Run = run,
 		}
 	end
@@ -9695,18 +9801,35 @@ function MacUI:CreateWindow(config)
 				table.insert(actions, action)
 			end
 		end
+		local function Done()
+			table.sort(actions, function(a, b)
+				if (a.Score or 0) ~= (b.Score or 0) then
+					return (a.Score or 0) > (b.Score or 0)
+				end
+				return (a.Order or 0) < (b.Order or 0)
+			end)
+			while #actions > 3 do
+				table.remove(actions)
+			end
+			return actions
+		end
 		if #text < 3 then
 			return actions
 		end
 
-		-- the window itself: themes, accents, undo
-		local themeWord = text:gsub("^switch to ", ""):gsub("^theme ", ""):gsub(" theme$", ""):gsub(" mode$", "")
-		for _, name in ipairs(MacUI:GetThemes()) do
-			if name:lower() == themeWord and name ~= MacUI.ThemeName then
-				Add(WindowAction("theme:" .. name, "Switch to the " .. name .. " theme", "Appearance", "palette", function()
-					MacUI:SetTheme(name)
-					return "Theme", name
-				end))
+		-- the window itself: "light mode", "theme ocean", "accent purple", "undo"
+		local themeWord = text:match("^(.+) theme$")
+			or text:match("^(.+) mode$")
+			or text:match("^theme (.+)$")
+			or text:match("^switch to (.+)$")
+		if themeWord then
+			for _, name in ipairs(MacUI:GetThemes()) do
+				if name:lower() == themeWord and name ~= MacUI.ThemeName then
+					Add(WindowAction("theme:" .. name, "Switch to the " .. name .. " theme", "Appearance", "palette", function()
+						MacUI:SetTheme(name)
+						return "Theme", name
+					end))
+				end
 			end
 		end
 		local accentWord = text:match("^accent (.+)$") or text:match("^(.+) accent$")
@@ -9735,18 +9858,38 @@ function MacUI:CreateWindow(config)
 			end))
 		end
 
-		-- "... in 20m" / "... after 1h" (toggle timers), "... every 30s" (repeats)
+		-- "name = value" or "name: value": everything after the sign is the
+		-- value, word for word ("status = back in 5" keeps its "in 5"). A colon
+		-- needs a space after it, so titles like "Window:Minimize" stay titles.
+		local name, at = text:match("^(.-)%s*=%s*()%S")
+		if not name or name == "" then
+			name, at = text:match("^(.-):%s+()%S")
+		end
+		if name and name ~= "" then
+			name = name:gsub("^set ", "")
+			local value, rawValue = text:sub(at), raw:sub(at)
+			for _, match in ipairs(FindControls(name)) do
+				local parsed = Interpret(match.Element, value, rawValue, true)
+				if parsed ~= nil then
+					Add(ValueAction(match, parsed))
+				end
+			end
+			return Done()
+		end
+
+		-- "... in 20m" / "... after 1h" (a toggle timer), "... every 30s" (a
+		-- repeat); the last "in" counts, so "sign in bonus off in 5m" works
 		local first, last = 1, #text
 		local timing, seconds
-		local head, rest = text:match("^(.-) in (.+)$")
+		local head, rest = text:match("^(.*) in (.+)$")
 		if not head then
-			head, rest = text:match("^(.-) after (.+)$")
+			head, rest = text:match("^(.*) after (.+)$")
 		end
 		local duration = head and head ~= "" and ParseDuration(rest, "m")
 		if duration then
 			timing, seconds, last = "in", duration, #head
 		else
-			head, rest = text:match("^(.-) every (.+)$")
+			head, rest = text:match("^(.*) every (.+)$")
 			duration = head and head ~= "" and ParseDuration(rest, "s")
 			if duration then
 				timing, seconds, last = "every", duration, #head
@@ -9764,67 +9907,96 @@ function MacUI:CreateWindow(config)
 		local body = text:sub(first, last)
 		local rawBody = raw:sub(first, last)
 
+		-- Anything a verb can't do with a time ("press x in 5m") is left out
+		-- rather than done straight away.
 		if verb == "on" or verb == "off" or verb == "toggle" then
-			for _, match in ipairs(FindControls(body)) do
-				if match.Element.Type == "Toggle" then
-					local value = (verb == "toggle" and not match.Element.Value) or verb == "on"
-					Add(timing == "in" and TimerAction(match, value, seconds) or ValueAction(match, value))
+			if timing ~= "every" then
+				for _, match in ipairs(FindControls(body)) do
+					local element = match.Element
+					if element.Type == "Toggle" then
+						local value
+						if verb == "toggle" then
+							value = not element.Value
+						else
+							value = verb == "on"
+						end
+						if timing == "in" then
+							Add(TimerAction(match, value, seconds))
+						else
+							Add(ValueAction(match, value))
+						end
+					end
 				end
 			end
 		elseif verb == "reset" then
-			for _, match in ipairs(FindControls(body)) do
-				local element = match.Element
-				if (element.Default ~= nil or element._Reset) and not element:IsDefault() then
-					Add(NewAction(match, "Reset " .. match.Row.Title, "rotate-ccw", "Reset", function()
-						element:Reset()
-						return match.Row.Title, "Reset"
-					end))
+			if timing == nil then
+				for _, match in ipairs(FindControls(body)) do
+					local element = match.Element
+					if (element.Default ~= nil or element._Reset) and not element:IsDefault() then
+						Add(NewAction(match, "Reset " .. match.Row.Title, "rotate-ccw", "Reset", function()
+							element:Reset()
+							return match.Row.Title, "Reset"
+						end))
+					end
 				end
 			end
 		elseif verb == "run" then
 			for _, match in ipairs(FindControls(body)) do
 				local element = match.Element
 				if element.Type == "Button" then
-					Add(timing == "every" and RepeatAction(match, seconds) or NewAction(match, "Press " .. match.Row.Title, "play", "Run", function()
-						element:Fire()
-						return match.Row.Title, nil
-					end))
+					if timing == "every" then
+						Add(RepeatAction(match, seconds))
+					elseif timing == nil then
+						Add(NewAction(match, "Press " .. match.Row.Title, "play", "Run", function()
+							element:Fire()
+							return match.Row.Title, nil
+						end))
+					end
 				end
 			end
-			for _, command in ipairs(Window.Commands) do
-				local score = Score({ TitleLower = command.Title:lower(), Search = command.Keywords:lower() }, body)
-				if timing == nil and score >= 50 then
-					local entry = WindowAction("command:" .. command.Title, "Run " .. command.Title, command.Description or "Command", command.Icon, function()
-						command:Run(true)
-					end)
-					entry.TileColor = command.TileColor
-					entry.Score = score
-					Add(entry)
+			if timing == nil and #body >= 3 then
+				for index, command in ipairs(Window.Commands) do
+					local score = Score({ TitleLower = command.Title:lower(), Search = "" }, body)
+					if score >= 80 then
+						local entry = WindowAction("command:" .. command.Title, "Run " .. command.Title, command.Description or "Command", command.Icon, function()
+							command:Run(true)
+						end)
+						entry.TileColor = command.TileColor
+						entry.Score = score
+						entry.Order = index
+						Add(entry)
+					end
 				end
 			end
 		elseif verb == "play" then
-			for _, match in ipairs(FindControls(body)) do
-				local element = match.Element
-				if element.Type == "Macro" and #element.Steps > 0 then
-					Add(NewAction(match, (element.Playing and "Stop " or "Play ") .. match.Row.Title, "play", "Play", function()
-						element:_Activate(true)
-					end))
+			if timing == nil then
+				for _, match in ipairs(FindControls(body)) do
+					local element = match.Element
+					if element.Type == "Macro" and #element.Steps > 0 then
+						Add(NewAction(match, (element.Playing and "Stop " or "Play ") .. match.Row.Title, "play", "Play", function()
+							element:_Activate(true)
+						end))
+					end
 				end
 			end
 		end
 
-		if verb == nil or verb == "set" or verb == "turn" then
-			-- "name = value", "name: value", "name to value" (text fields too)
-			local name, position = body:match("^(.-)%s*[=:]%s*()%S")
-			if not name or name == "" then
-				name, position = body:match("^(.-) to ()%S")
+		if (verb == nil or verb == "set" or verb == "turn") and timing ~= "every" then
+			local function Offer(match, parsed)
+				if timing == "in" then
+					Add(TimerAction(match, parsed, seconds)) -- toggles only
+				else
+					Add(ValueAction(match, parsed))
+				end
 			end
-			if name and name ~= "" then
-				local value, rawValue = body:sub(position), rawBody:sub(position)
-				for _, match in ipairs(FindControls(name)) do
-					local parsed = Interpret(match.Element, value, rawValue, true)
+			-- "walk speed to 50"; "set nickname to Bob" fills a text field too
+			local toName, toAt = body:match("^(.-) to ()%S")
+			if toName and toName ~= "" then
+				local value, rawValue = body:sub(toAt), rawBody:sub(toAt)
+				for _, match in ipairs(FindControls(toName)) do
+					local parsed = Interpret(match.Element, value, rawValue, verb == "set")
 					if parsed ~= nil then
-						Add(ValueAction(match, parsed))
+						Offer(match, parsed)
 					end
 				end
 			end
@@ -9839,29 +10011,22 @@ function MacUI:CreateWindow(config)
 				for _, match in ipairs(FindControls(controlName)) do
 					local parsed = Interpret(match.Element, value, value, false)
 					if parsed ~= nil then
-						if timing == "in" then
-							Add(TimerAction(match, parsed, seconds))
-						elseif timing == nil then
-							Add(ValueAction(match, parsed))
-						end
+						Offer(match, parsed)
 					end
 				end
 			end
-			-- "auto farm in 30m" flips it later; "collect every 10s" repeats it
-			if timing then
-				for _, match in ipairs(FindControls(body)) do
-					Add(timing == "in" and TimerAction(match, nil, seconds) or RepeatAction(match, seconds))
-				end
+		end
+		-- "auto farm in 30m" flips it later; "collect every 10s" presses it
+		if verb == nil and timing == "in" then
+			for _, match in ipairs(FindControls(body)) do
+				Add(TimerAction(match, nil, seconds))
+			end
+		elseif verb == nil and timing == "every" then
+			for _, match in ipairs(FindControls(body)) do
+				Add(RepeatAction(match, seconds))
 			end
 		end
-
-		table.sort(actions, function(a, b)
-			return (a.Score or 0) > (b.Score or 0)
-		end)
-		while #actions > 3 do
-			table.remove(actions)
-		end
-		return actions
+		return Done()
 	end
 
 	local function Heading(title)
@@ -9951,6 +10116,18 @@ function MacUI:CreateWindow(config)
 		local actions = ParseActions(text)
 		if #actions == 0 then
 			return matches
+		end
+		if matches[1] and matches[1].Score == 100 then
+			-- an exact title stays first, so Enter does what it always did
+			table.insert(results, Heading("Results"))
+			for _, entry in ipairs(matches) do
+				table.insert(results, entry)
+			end
+			table.insert(results, Heading("Actions"))
+			for _, action in ipairs(actions) do
+				table.insert(results, action)
+			end
+			return results
 		end
 		table.insert(results, Heading("Actions"))
 		for _, action in ipairs(actions) do
@@ -10183,9 +10360,10 @@ function MacUI:CreateWindow(config)
 			table.clear(items)
 			results = SpotlightSearch(box.Text)
 			pointerMoved, renderMouse = false, MousePosition()
-			local y, headingAbove = 0, false
+			local y, headingAbove, headings = 0, false, 0
 			for order, entry in ipairs(results) do
 				if entry.Kind == "Header" then
+					headings += 1
 					local heading = New("TextLabel", {
 						Name = "Header",
 						Text = entry.Title,
@@ -10282,11 +10460,17 @@ function MacUI:CreateWindow(config)
 					table.insert(rendered, item.Button)
 				end
 			end
-			selected = math.clamp(selected, 1, math.max(#items, 1))
+			if box.Text:match("^%s*$") then
+				-- nothing is picked until you type or move: Enter mustn't run a
+				-- suggestion (a command, say) by accident
+				selected = 0
+			else
+				selected = math.clamp(selected, 1, math.max(#items, 1))
+			end
 			empty.Visible = #items == 0 and box.Text ~= ""
 			divider.Visible = #items > 0 or empty.Visible
-			-- room for two headings on top of the usual seven rows
-			visibleHeight = math.min(y, maxVisible * itemHeight + 2 * headerHeight)
+			-- seven rows, plus room for up to two of the headings shown
+			visibleHeight = math.min(y, maxVisible * itemHeight + math.min(headings, 2) * headerHeight)
 			local listHeight = #items > 0 and (visibleHeight + 12) or (empty.Visible and 52 or 0)
 			Tween(holder, { Size = UDim2.fromOffset(width, searchHeight + (listHeight > 0 and listHeight + 1 or 0)) }, 0.18)
 			Paint()
