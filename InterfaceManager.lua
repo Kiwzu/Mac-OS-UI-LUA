@@ -129,8 +129,12 @@ function InterfaceManager:BuildInterfaceSection(tab)
 	end
 	-- ...then apply what the user chose last time.
 	self:LoadSettings()
+	-- a saved custom theme may only be registered later (ThemeManager)
+	local pendingTheme
 	if saved.Theme and library.Themes[saved.Theme] then
 		library:SetTheme(saved.Theme, true)
+	elseif saved.Theme then
+		pendingTheme = saved.Theme
 	end
 	if saved.Accent and library.Accents[saved.Accent] then
 		library:SetAccent(saved.Accent, true)
@@ -148,19 +152,33 @@ function InterfaceManager:BuildInterfaceSection(tab)
 		Icon = "monitor",
 	})
 
-	local themeControl = section:AddSegmented("InterfaceTheme", {
+	-- a segmented control for a few themes, a menu once there are custom ones
+	local themeNames = library:GetThemes()
+	local themeInfo = {
 		Title = "Appearance",
-		Values = library:GetThemes(),
+		Values = themeNames,
 		Default = library.ThemeName,
 		Callback = function(value)
-			if value ~= library.ThemeName then
+			if value and value ~= library.ThemeName then
 				library:SetTheme(value)
 			end
-			if ready then
+			if ready and value then
 				self:Set("Theme", value)
 			end
 		end,
-	})
+	}
+	local themeControl = #themeNames <= 5 and section:AddSegmented("InterfaceTheme", themeInfo)
+		or section:AddDropdown("InterfaceTheme", themeInfo)
+	if library.ThemesChanged then
+		library.ThemesChanged:Connect(function(names)
+			themeControl:SetValues(names)
+			if pendingTheme and library.Themes[pendingTheme] then
+				local name = pendingTheme
+				pendingTheme = nil
+				library:SetTheme(name, true)
+			end
+		end)
+	end
 
 	local accentNames = table.clone(library.AccentOrder)
 	local accentControl = section:AddDropdown("InterfaceAccent", {

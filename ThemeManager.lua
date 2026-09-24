@@ -7,6 +7,11 @@
 	ThemeManager:SetLibrary(MacUI)
 	ThemeManager:SetFolder("MyHub")
 	ThemeManager:BuildThemeSection(Tabs.Settings)
+
+	Custom themes: ThemeManager:BuildThemeEditor(Tabs.Settings) adds a live
+	editor. Saved themes live in <Folder>/themes and come back with
+	ThemeManager:LoadCustomThemes(); call that before anything that lists
+	themes (such as InterfaceManager:BuildInterfaceSection).
 ]]
 
 local HttpService = game:GetService("HttpService")
@@ -15,7 +20,19 @@ local ThemeManager = {
 	Library = nil,
 	Folder = "MacUI",
 	CurrentTheme = "Dark",
+	-- { token, label } pairs the theme editor shows; the rest come from the base theme
+	EditorTokens = {
+		{ "Background", "Window" },
+		{ "Sidebar", "Sidebar" },
+		{ "Group", "Groups" },
+		{ "Separator", "Separators" },
+		{ "Control", "Controls" },
+		{ "Text", "Text" },
+		{ "SubText", "Secondary text" },
+	},
 }
+
+local BUILT_IN = { Dark = true, Light = true, Midnight = true }
 ThemeManager.__index = ThemeManager
 
 local function HasFileApi()
@@ -110,6 +127,200 @@ function ThemeManager:LoadDefault()
 	end
 end
 
+function ThemeManager:_ThemeFolder()
+	return self.Folder .. "/themes"
+end
+
+-- Registers every theme saved with the editor.
+function ThemeManager:LoadCustomThemes()
+	local library = self.Library
+	if not library or not HasFileApi() or type(listfiles) ~= "function" or type(isfolder) ~= "function" then
+		return
+	end
+	local folder = self:_ThemeFolder()
+	if not isfolder(folder) then
+		return
+	end
+	for _, file in ipairs(listfiles(folder)) do
+		local name = file:gsub("\\", "/"):match("([^/]+)%.json$")
+		if name and not BUILT_IN[name] then
+			local ok, data = pcall(function()
+				return HttpService:JSONDecode(readfile(file))
+			end)
+			if ok and type(data) == "table" then
+				local tokens = {}
+				for token, hex in pairs(type(data.Tokens) == "table" and data.Tokens or {}) do
+					local parsed, color = pcall(Color3.fromHex, tostring(hex))
+					if parsed then
+						tokens[token] = color
+					end
+				end
+				library:AddTheme(name, tokens, library.Themes[data.Base] and data.Base or "Dark")
+			end
+		end
+	end
+end
+
+-- Saves and registers a theme. `tokens` maps token names to Color3s. Returns
+-- true and the cleaned-up name, or false and a reason.
+function ThemeManager:SaveCustomTheme(name, tokens, base)
+	name = (tostring(name or ""):gsub("[^%w%s%-_]", ""))
+	name = (name:gsub("^%s+", ""):gsub("%s+$", ""))
+	if name == "" then
+		return false, "Give the theme a name first."
+	elseif BUILT_IN[name] then
+		return false, "“" .. name .. "” is a built-in theme."
+	end
+	local encoded = {}
+	for token, color in pairs(tokens or {}) do
+		if typeof(color) == "Color3" then
+			encoded[token] = color:ToHex()
+		end
+	end
+	if HasFileApi() then
+		EnsureFolder(self:_ThemeFolder())
+		writefile(self:_ThemeFolder() .. "/" .. name .. ".json", HttpService:JSONEncode({ Base = base or "Dark", Tokens = encoded }))
+	end
+	self.Library:AddTheme(name, tokens, base)
+	return true, name
+end
+
+-- Deletes a saved theme (built-in themes stay).
+function ThemeManager:DeleteCustomTheme(name)
+	if BUILT_IN[name] then
+		return false
+	end
+	local path = self:_ThemeFolder() .. "/" .. tostring(name) .. ".json"
+	if type(delfile) == "function" and HasFileApi() and isfile(path) then
+		delfile(path)
+	end
+	return self.Library:RemoveTheme(name)
+end
+
+-- Adds a collapsible "Theme editor" section: pick colours, preview them live,
+-- save the result as a named theme.
+function ThemeManager:BuildThemeEditor(tab)
+	assert(self.Library, "[ThemeManager] call SetLibrary(MacUI) first")
+	local library = self.Library
+	self:LoadCustomThemes()
+	local section = tab:AddSection({
+		Title = "Theme editor",
+		Description = "Design your own theme. Changes preview live; save to keep them.",
+		Icon = "brush",
+		Collapsible = true,
+		Collapsed = true,
+	})
+	local pickers = {}
+	local ready = false
+	local queued = false
+	local baseControl
+
+	local function Tokens()
+		local tokens = {}
+		for _, spec in ipairs(self.EditorTokens) do
+			tokens[spec[1]] = pickers[spec[1]].Value
+		end
+		return tokens
+	end
+	local function Preview()
+		if not ready or queued then
+			return
+		end
+		queued = true
+		task.delay(0.12, function()
+			queued = false
+			if not library.Unloaded then
+				library:PreviewTheme(Tokens(), baseControl.Value)
+			end
+		end)
+	end
+	local function LoadFrom(name)
+		local theme = library.Themes[name] or library.ThemeData
+		local wasReady = ready
+		ready = false
+		for _, spec in ipairs(self.EditorTokens) do
+			if theme[spec[1]] then
+				pickers[spec[1]]:SetValueRGB(theme[spec[1]])
+			end
+		end
+		ready = wasReady
+	end
+	local function Notify(title, content, failed)
+		library:Notify({
+			Title = title,
+			Content = content,
+			Icon = failed and "alert-triangle" or "palette",
+			IconColor = failed and "Orange" or nil,
+			Duration = 4,
+		})
+	end
+
+	baseControl = section:AddDropdown("ThemeEditor_Base", {
+		Title = "Start from",
+		Description = "Colours you don't change here come from this theme.",
+		Values = library:GetThemes(),
+		Default = library.ThemeName,
+		Callback = function(name)
+			if name and ready then
+				LoadFrom(name)
+				Preview()
+			end
+		end,
+	})
+	local current = library.ThemeData or library.Themes.Dark
+	for _, spec in ipairs(self.EditorTokens) do
+		pickers[spec[1]] = section:AddColorpicker("ThemeEditor_" .. spec[1], {
+			Title = spec[2],
+			Default = current[spec[1]],
+			Callback = Preview,
+		})
+	end
+	local nameInput = section:AddInput("ThemeEditor_Name", { Title = "Name", Placeholder = "My theme" })
+	section:AddButton({
+		Title = "Save theme",
+		Description = "Adds it to the theme list, now and next time.",
+		ButtonText = "Save",
+		Style = "Primary",
+		Callback = function()
+			local ok, result = self:SaveCustomTheme(nameInput.Value, Tokens(), baseControl.Value)
+			if not ok then
+				return Notify("Couldn’t save theme", result, true)
+			end
+			library:SetTheme(result)
+			Notify("Theme saved", "“" .. result .. "” is in your theme list.")
+		end,
+	})
+	section:AddButton({
+		Title = "Discard changes",
+		Description = "Go back to the theme you're using.",
+		ButtonText = "Discard",
+		Callback = function()
+			library:SetTheme(library.ThemeName, true)
+			LoadFrom(library.ThemeName)
+		end,
+	})
+	section:AddButton({
+		Title = "Delete theme",
+		Description = "Deletes the “Start from” theme if you made it.",
+		ButtonText = "Delete",
+		Style = "Destructive",
+		Callback = function()
+			local name = baseControl.Value
+			if not name or BUILT_IN[name] then
+				return Notify("Can’t delete " .. tostring(name), "Built-in themes stay.", true)
+			end
+			if self:DeleteCustomTheme(name) then
+				Notify("Theme deleted", "“" .. name .. "” was removed.")
+			end
+		end,
+	})
+	library.ThemesChanged:Connect(function(names)
+		baseControl:SetValues(names)
+	end)
+	ready = true
+	return section
+end
+
 -- Adds an "Appearance" section: theme picker, accent colours and a save button.
 function ThemeManager:BuildThemeSection(tab)
 	assert(self.Library, "[ThemeManager] call SetLibrary(MacUI) first")
@@ -150,6 +361,9 @@ function ThemeManager:BuildThemeSection(tab)
 		if themeControl.Value ~= name then
 			themeControl:SetValue(name)
 		end
+	end)
+	library.ThemesChanged:Connect(function(names)
+		themeControl:SetValues(names)
 	end)
 	library.AccentChanged:Connect(function(color)
 		for _, name in ipairs(accentNames) do

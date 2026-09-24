@@ -89,6 +89,9 @@ local Window = MacUI:CreateWindow({
 	ConfirmClose = true, -- the red button asks before unloading
 	ReplaceExisting = true, -- running the script again replaces this window
 	ShowDock = true, -- dock icon while minimised
+	Loading = { Subtitle = "Loading every demo…" }, -- a loading card while the tabs build
+	Undo = true, -- Ctrl + Z / Ctrl + Shift + Z for changes you make
+	-- Watermark = true, -- a status pill; this demo turns it on from the Advanced page
 })
 
 -- A Description gives the page a System Settings-style header.
@@ -98,6 +101,7 @@ local Tabs = {
 	Display = Window:AddTab({ Title = "Display", Icon = "layout-grid", Description = "Read-only rows and every kind of button." }),
 	Methods = Window:AddTab({ Title = "Methods", Icon = "wrench", Description = "What you can do with an element after creating it." }),
 	Smart = Window:AddTab({ Title = "Smart rows", Icon = "wand-2", Description = "Dependencies, tooltips, search keywords and live player lists." }),
+	Advanced = Window:AddTab({ Title = "Advanced", Icon = "rocket", Description = "Live graphs, tables, undo, Spotlight commands, the watermark, loading screens and collapsible sections." }),
 	Window = Window:AddTab({ Title = "Window", Icon = "app-window", Section = "Window", Description = "Title bar, layout, navigation and saved state." }),
 	Alerts = Window:AddTab({ Title = "Alerts", Icon = "bell", Description = "Notifications, toasts and dialogs." }),
 	Appearance = Window:AddTab({ Title = "Appearance", Icon = "palette", Section = "Settings", Description = "Themes, accent colours, fonts, frosted glass and more." }),
@@ -700,6 +704,197 @@ Live:AddButton({
 })
 
 --------------------------------------------------------------------------------
+-- Advanced
+--------------------------------------------------------------------------------
+
+local LiveData = Tabs.Advanced:AddSection({ Title = "Live data", Description = "AddGraph and AddTable.", Icon = "activity" })
+local FpsGraph = LiveData:AddGraph("DemoFpsGraph", {
+	Title = "Frame rate",
+	Description = "Graph:Push(value) twice a second.",
+	Points = 40,
+	Suffix = " fps",
+})
+local frames, elapsed = 0, 0
+local heartbeat = game:GetService("RunService").Heartbeat:Connect(function(dt)
+	frames += 1
+	elapsed += dt
+	if elapsed >= 0.5 then
+		FpsGraph:Push(frames / elapsed)
+		frames, elapsed = 0, 0
+	end
+end)
+
+local PlayerTable = LiveData:AddTable("DemoPlayerTable", {
+	Title = "Players",
+	Description = "Click a header to sort, click a row to select it.",
+	Columns = { { Title = "Name", Width = 2 }, { Title = "Account age", Align = "Right" }, "Team" },
+	MaxRows = 6,
+	SortBy = "Name",
+	Callback = function(row)
+		if row then
+			Window:Toast("Selected", { Detail = tostring(row[1]), Icon = "user" })
+		end
+	end,
+})
+local function RefreshPlayers()
+	local rows = {}
+	for _, player in ipairs(Players:GetPlayers()) do
+		table.insert(rows, { player.DisplayName, player.AccountAge, player.Team and player.Team.Name or "—" })
+	end
+	PlayerTable:SetRows(rows)
+end
+RefreshPlayers()
+local joined = Players.PlayerAdded:Connect(RefreshPlayers)
+local left = Players.PlayerRemoving:Connect(function()
+	task.defer(RefreshPlayers)
+end)
+MacUI:OnUnload(function()
+	heartbeat:Disconnect()
+	joined:Disconnect()
+	left:Disconnect()
+end)
+
+local Folded = Tabs.Advanced:AddSection({
+	Title = "Collapsible section",
+	Description = "Collapsible = true, Collapsed = true. Click the title to open it.",
+	Icon = "list",
+	Collapsible = true,
+	Collapsed = true,
+})
+Folded:AddToggle("DemoFoldedToggle", { Title = "Rarely used option", Default = false })
+Folded:AddSlider("DemoFoldedSlider", { Title = "Another one", Min = 0, Max = 10, Default = 3 })
+Folded:AddButton({
+	Title = "Section:SetCollapsed",
+	Description = "Folds this section from code.",
+	ButtonText = "Fold",
+	Callback = function()
+		Folded:SetCollapsed(true)
+	end,
+})
+
+local Changes = Tabs.Advanced:AddSection({
+	Title = "Undo and redo",
+	Description = "Ctrl + Z undoes a change you made; Ctrl + Shift + Z or Ctrl + Y redoes it.",
+	Icon = "undo-2",
+})
+Changes:AddButton({
+	Title = "MacUI:Undo",
+	Description = "Same as Ctrl + Z. Change something first.",
+	ButtonText = "Undo",
+	Callback = function()
+		if not MacUI:Undo() then
+			Window:Toast("Nothing to undo")
+		end
+	end,
+})
+Changes:AddButton({
+	Title = "MacUI:Redo",
+	ButtonText = "Redo",
+	Callback = function()
+		if not MacUI:Redo() then
+			Window:Toast("Nothing to redo")
+		end
+	end,
+})
+Changes:AddButton({
+	Title = "MacUI:ClearHistory",
+	ButtonText = "Clear",
+	Callback = function()
+		MacUI:ClearHistory()
+		Window:Toast("History cleared")
+	end,
+})
+
+-- Commands live in Spotlight (Ctrl + K); a Shortcut runs them from anywhere.
+Window:AddCommand({
+	Title = "Copy server ID",
+	Description = "Copies this server's JobId.",
+	Icon = "copy",
+	IconColor = "Blue",
+	Keywords = "jobid server",
+	Callback = function()
+		MacUI:SetClipboard(game.JobId)
+	end,
+})
+Window:AddCommand({
+	Title = "Reset character",
+	Description = "Respawns you, like the Roblox menu's Reset.",
+	Icon = "rotate-ccw",
+	IconColor = "Orange",
+	Keywords = "respawn",
+	Shortcut = "F6",
+	Callback = function()
+		local character = LocalPlayer.Character
+		local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+		if humanoid then
+			humanoid.Health = 0
+		end
+	end,
+})
+Window:AddCommand({
+	Title = "Rejoin server",
+	Description = "Teleports you back into this game.",
+	Icon = "refresh-cw",
+	IconColor = "Green",
+	Keywords = "reconnect",
+	Callback = function()
+		game:GetService("TeleportService"):Teleport(game.PlaceId, LocalPlayer)
+	end,
+})
+local CommandSection = Tabs.Advanced:AddSection({
+	Title = "Spotlight commands",
+	Description = "Window:AddCommand adds actions to Spotlight: three are added here.",
+	Icon = "command",
+})
+CommandSection:AddButton({
+	Title = "See them in Spotlight",
+	Description = "“Reset character” also runs with F6.",
+	ButtonText = "Open",
+	Callback = function()
+		Window:OpenSpotlight()
+	end,
+})
+
+local Overlay = Tabs.Advanced:AddSection({ Title = "Watermark", Description = "MacUI:SetWatermark: a floating status pill you can drag.", Icon = "monitor" })
+local positions = { "TopLeft", "TopCenter", "TopRight", "BottomLeft", "BottomCenter", "BottomRight" }
+local function ShowWatermark()
+	if Options.DemoWatermark and Options.DemoWatermark.Value then
+		MacUI:SetWatermark({
+			Text = "MacUI Demo",
+			Icon = "command",
+			Clock = true,
+			Position = Options.DemoWatermarkPosition and Options.DemoWatermarkPosition.Value or "TopCenter",
+		})
+	else
+		MacUI:SetWatermark(false)
+	end
+end
+Overlay:AddToggle("DemoWatermark", { Title = "Show watermark", Description = "Name, FPS, ping and the time.", Default = true, Callback = ShowWatermark })
+Overlay:AddDropdown("DemoWatermarkPosition", { Title = "Position", Values = positions, Default = "TopCenter", DependsOn = "DemoWatermark", Callback = ShowWatermark })
+
+local LoadingSection = Tabs.Advanced:AddSection({
+	Title = "Loading screen",
+	Description = "CreateWindow({ Loading = true }) or MacUI:ShowLoading().",
+	Icon = "timer",
+})
+LoadingSection:AddButton({
+	Title = "MacUI:ShowLoading",
+	Description = "A fake three-step load with SetProgress and Finish.",
+	ButtonText = "Show",
+	Callback = function()
+		local loader = MacUI:ShowLoading({ Title = "Updating", Subtitle = "Starting…", Icon = "download", IconColor = "Green" })
+		task.spawn(function()
+			for step, text in ipairs({ "Fetching data…", "Applying settings…", "Almost done…" }) do
+				task.wait(0.8)
+				loader:SetProgress(step / 3, text)
+			end
+			task.wait(0.4)
+			loader:Finish("Done")
+		end)
+	end,
+})
+
+--------------------------------------------------------------------------------
 -- Window
 --------------------------------------------------------------------------------
 
@@ -1043,6 +1238,11 @@ Dialogs:AddButton({
 -- Appearance
 --------------------------------------------------------------------------------
 
+-- ThemeManager first, so themes saved with its editor are in the lists below.
+ThemeManager:SetLibrary(MacUI)
+ThemeManager:SetFolder("MacUI/Demo")
+ThemeManager:LoadCustomThemes()
+
 -- Theme, accent, frosted glass, size, reduce motion, shortcut list,
 -- remember window, show/hide key and unload, all remembered between sessions.
 InterfaceManager:SetLibrary(MacUI)
@@ -1066,9 +1266,7 @@ Styling:AddDropdown("DemoFont", {
 AccentManager:SetLibrary(MacUI)
 AccentManager:BuildAccentPicker(Styling)
 
--- ThemeManager: apply themes by name.
-ThemeManager:SetLibrary(MacUI)
-ThemeManager:SetFolder("MacUI/Demo")
+-- ThemeManager: apply themes by name, or design new ones in the editor.
 Styling:AddButton({
 	Title = "ThemeManager:ApplyTheme",
 	Description = "Cycles through every theme, including Ocean and Rose from MacUI:AddTheme.",
@@ -1079,6 +1277,7 @@ Styling:AddButton({
 		ThemeManager:ApplyTheme(themes[index % #themes + 1])
 	end,
 })
+ThemeManager:BuildThemeEditor(Tabs.Appearance) -- collapsed; click its title
 MacUI.ThemeChanged:Connect(function(name)
 	Window:Toast("Theme", { Detail = name, Icon = "palette" })
 end)

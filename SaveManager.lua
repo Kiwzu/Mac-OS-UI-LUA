@@ -12,6 +12,7 @@
 
 	Toggle and button shortcuts are saved too, and "Save changes
 	automatically" keeps the current profile up to date as you play.
+	ExportConfig() / ImportConfig(text) share settings as text.
 ]]
 
 local HttpService = game:GetService("HttpService")
@@ -20,6 +21,8 @@ local SaveManager = {
 	Library = nil,
 	Folder = "MacUI",
 	Ignore = {},
+	-- indexes starting with any of these are never saved
+	IgnorePrefixes = {},
 	Loading = false,
 	Autosave = false,
 	-- The profile last loaded or saved; autosave writes here.
@@ -183,6 +186,19 @@ function SaveManager:SetIgnoreIndexes(list)
 	end
 end
 
+function SaveManager:IsIgnored(idx)
+	if self.Ignore[idx] then
+		return true
+	end
+	idx = tostring(idx)
+	for _, prefix in ipairs(self.IgnorePrefixes) do
+		if idx:sub(1, #prefix) == prefix then
+			return true
+		end
+	end
+	return false
+end
+
 function SaveManager:IgnoreThemeSettings()
 	self:SetIgnoreIndexes({
 		"InterfaceTheme",
@@ -198,6 +214,7 @@ function SaveManager:IgnoreThemeSettings()
 		"AccentManager_Accent",
 		"AccentManager_Color",
 	})
+	table.insert(self.IgnorePrefixes, "ThemeEditor_")
 end
 
 function SaveManager:BuildFolderTree()
@@ -213,6 +230,36 @@ function SaveManager:BuildFolderTree()
 	end
 end
 
+-- Every saved option, in the profile file format.
+function SaveManager:_Collect()
+	local data = { objects = {} }
+	for idx, option in pairs(self.Library.Options) do
+		local parser = self.Parser[option.Type]
+		if parser and not self:IsIgnored(idx) then
+			local entry = parser.Save(idx, option)
+			if entry then
+				table.insert(data.objects, entry)
+			end
+		end
+	end
+	return data
+end
+
+-- Applies a decoded profile.
+function SaveManager:_Apply(decoded)
+	-- changes made while loading shouldn't trigger an autosave
+	self.Loading = true
+	for _, entry in ipairs(decoded.objects or {}) do
+		local parser = self.Parser[entry.type]
+		if parser and not self:IsIgnored(entry.idx) then
+			task.spawn(parser.Load, entry.idx, entry)
+		end
+	end
+	task.defer(function()
+		self.Loading = false
+	end)
+end
+
 function SaveManager:Save(name)
 	if not name or name:gsub("%s", "") == "" then
 		return false, "no config name given"
@@ -221,17 +268,7 @@ function SaveManager:Save(name)
 		return false, "your executor has no file functions"
 	end
 	self:BuildFolderTree()
-	local data = { objects = {} }
-	for idx, option in pairs(self.Library.Options) do
-		local parser = self.Parser[option.Type]
-		if parser and not self.Ignore[idx] then
-			local entry = parser.Save(idx, option)
-			if entry then
-				table.insert(data.objects, entry)
-			end
-		end
-	end
-	local ok, encoded = pcall(HttpService.JSONEncode, HttpService, data)
+	local ok, encoded = pcall(HttpService.JSONEncode, HttpService, self:_Collect())
 	if not ok then
 		return false, "failed to encode data"
 	end
@@ -258,17 +295,26 @@ function SaveManager:Load(name)
 	end
 	self.ActiveProfile = name
 	self.Ready = true
-	-- changes made while loading shouldn't trigger an autosave
-	self.Loading = true
-	for _, entry in ipairs(decoded.objects or {}) do
-		local parser = self.Parser[entry.type]
-		if parser and not self.Ignore[entry.idx] then
-			task.spawn(parser.Load, entry.idx, entry)
-		end
+	self:_Apply(decoded)
+	return true
+end
+
+-- The current settings as text to share (the profile file format).
+function SaveManager:ExportConfig()
+	local ok, encoded = pcall(HttpService.JSONEncode, HttpService, self:_Collect())
+	return ok and encoded or nil
+end
+
+-- Applies text from ExportConfig(). Returns true, or false and a reason.
+function SaveManager:ImportConfig(text)
+	if type(text) ~= "string" or text:gsub("%s", "") == "" then
+		return false, "paste a profile code first"
 	end
-	task.defer(function()
-		self.Loading = false
-	end)
+	local ok, decoded = pcall(HttpService.JSONDecode, HttpService, text)
+	if not ok or type(decoded) ~= "table" or type(decoded.objects) ~= "table" then
+		return false, "that isn't a profile code"
+	end
+	self:_Apply(decoded)
 	return true
 end
 
@@ -330,7 +376,7 @@ function SaveManager:SetAutosave(enabled)
 	end
 	local queued = false
 	self.AutosaveConnection = self.Library.OptionChanged:Connect(function(idx, _, element)
-		if not self.Autosave or not self.Ready or self.Loading or self.Ignore[idx] or queued then
+		if not self.Autosave or not self.Ready or self.Loading or self:IsIgnored(idx) or queued then
 			return
 		end
 		if element and not self.Parser[element.Type] then
@@ -463,6 +509,48 @@ function SaveManager:BuildConfigSection(tab)
 		ButtonText = "Refresh",
 		Callback = function()
 			list:SetValues(self:RefreshConfigList())
+		end,
+	})
+
+	section:AddButton({
+		Title = "Share profile",
+		Description = "Copy the current settings as text for someone else.",
+		ButtonText = "Copy",
+		Callback = function()
+			local code = self:ExportConfig()
+			if code and library.SetClipboard and library:SetClipboard(code) then
+				Notify("Profile copied", "Paste it into “Import profile” to use these settings.")
+			else
+				Notify("Couldn’t copy", "Your executor has no clipboard function.", true)
+			end
+		end,
+	})
+	section:AddButton({
+		Title = "Import profile",
+		Description = "Apply settings someone shared with you.",
+		ButtonText = "Import",
+		Callback = function()
+			local window = library.Windows and library.Windows[1]
+			if not window then
+				return
+			end
+			window:Dialog({
+				Title = "Import profile",
+				Content = "Paste a profile code copied with “Share profile”.",
+				Icon = "download",
+				Input = { Placeholder = "Profile code" },
+				Buttons = {
+					{ Title = "Import", Callback = function(text)
+						local ok, err = self:ImportConfig(text)
+						if ok then
+							Notify("Profile imported", "The shared settings are applied.")
+						else
+							Notify("Couldn’t import", err, true)
+						end
+					end },
+					{ Title = "Cancel" },
+				},
+			})
 		end,
 	})
 

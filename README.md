@@ -2,7 +2,7 @@
 
 **A macOS System Settings–style interface library for Roblox.**
 
-Traffic lights, a frosted sidebar with colourful icon tiles, page headers, grouped inset rows, native-looking controls, Spotlight search, right-click menus, keyboard shortcuts, sheets and Notification Center banners. The API is compatible with [Fluent](https://github.com/dawid-scripts/Fluent), so existing scripts only need a new loadstring.
+Traffic lights, a frosted sidebar with colourful icon tiles, page headers, grouped inset rows, native-looking controls, Spotlight search and commands, undo, right-click menus, keyboard shortcuts, live graphs and tables, sheets and Notification Center banners. The API is compatible with [Fluent](https://github.com/dawid-scripts/Fluent), so existing scripts only need a new loadstring.
 
 ![MacUI dark](assets/preview-dark.png)
 
@@ -11,6 +11,8 @@ Traffic lights, a frosted sidebar with colourful icon tiles, page headers, group
 | ![spotlight](assets/preview-spotlight.png) | ![context menu](assets/preview-context-menu.png) | ![light](assets/preview-light.png) |
 | **Colour picker** | **Dialog with a text field** | **Shortcut list** |
 | ![picker](assets/preview-colorpicker.png) | ![dialog](assets/preview-dialog.png) | ![shortcuts](assets/preview-shortcuts.png) |
+| **Graph, table and watermark** | **Commands in Spotlight** | **Loading screen** |
+| ![graph and table](assets/preview-graph-table.png) | ![commands](assets/preview-commands.png) | ![loading](assets/preview-loading.png) |
 
 > These previews were rendered outside Roblox. In game the text uses Builder Sans and the icons come from Roblox assets, so glyphs look slightly different.
 
@@ -28,6 +30,9 @@ Traffic lights, a frosted sidebar with colourful icon tiles, page headers, group
 - **Spotlight** (Ctrl + K, or Cmd + K on Mac): fuzzy-search every setting and page. Enter flips a toggle or runs a button, Shift + Enter just shows it, and the arrow keys move the selection.
 - **Right-click (or long-press) any row** to reset it to its default, copy its value, select or clear every option in a multi-select, or give it a **keyboard shortcut**.
 - **Shortcuts**: bind a key to any toggle or button from code or from the menu. A small HUD confirms each press ("Auto Farm On"). A floating **shortcut list** shows every keybind and shortcut.
+- **Undo and redo** (Ctrl/Cmd + Z, Ctrl/Cmd + Shift + Z): every change the user makes to a control can be taken back. A slider drag or a loaded profile undoes in one step.
+- **Commands**: add actions ("Rejoin server", "Copy server ID") that live in Spotlight and can have their own key.
+- **Collapsible sections** with a disclosure arrow, for pages with a lot of settings.
 - **Tooltips**, **dependencies** (grey out or hide a row until another option is on), live toolbar **search** (Enter jumps to the first match) and back/forward history.
 - **Remembers itself**: window position, size, page, theme, accent, scale and frosted glass come back next time (InterfaceManager). Profiles can **save automatically** (SaveManager).
 - Re-running your script replaces the old window instead of stacking a second one.
@@ -35,8 +40,10 @@ Traffic lights, a frosted sidebar with colourful icon tiles, page headers, group
 
 **Complete**
 - Controls: switch, checkbox, slider with an editable value, **stepper**, **radio group**, pop-up menu (single, multi or searchable, plus live **player** and **team** lists), text field, shortcut recorder, colour well with an HSV/hex popover, segmented control, progress bar, key/value label, paragraph, **code block** with a copy button, **image**, and push buttons.
+- **Live graph** (FPS, ping, earnings) and a sortable, selectable **table** (players, logs, stats).
 - Notifications with **action buttons**, dialogs with an optional **text field**, and HUD toasts.
-- Addons: SaveManager (profiles, autoload and autosave, compatible with Fluent config files), InterfaceManager, ThemeManager and AccentManager.
+- A **loading screen** while your script builds, and a draggable **watermark** with FPS, ping and a clock.
+- Addons: SaveManager (profiles, autoload, autosave, and **profile codes** to share settings; compatible with Fluent config files), InterfaceManager, ThemeManager (with a **theme editor** that saves your own themes) and AccentManager.
 
 ---
 
@@ -113,7 +120,18 @@ local Window = MacUI:CreateWindow({
     ConfirmClose = true,            -- ask before the red button unloads the UI
     ReplaceExisting = true,         -- re-running the script closes the old window
     Scale = nil,                    -- fixed UI scale; nil picks one to fit the screen
+    Undo = true,                    -- Ctrl/Cmd + Z undoes the user's last change
+    Loading = false,                -- true, or { Title, Subtitle, Icon, Duration = seconds | false }
+    Watermark = false,              -- true, or the options of MacUI:SetWatermark
 })
+```
+
+With `Loading`, the window stays hidden behind a loading card while your script adds its tabs, then opens by itself after `Duration` seconds (1.4 by default). With `Duration = false`, drive the bar yourself and open the window when you're ready:
+
+```lua
+local Window = MacUI:CreateWindow({ Title = "My Hub", Loading = { Subtitle = "Fetching data…", Duration = false } })
+Window.Loader:SetProgress(0.5, "Loading items…")   -- 0 to 1, with a status line
+Window:FinishLoading("Ready")
 ```
 
 | Method | Description |
@@ -136,6 +154,8 @@ local Window = MacUI:CreateWindow({
 | `Window:SetScale(number)` | Scales the whole window. |
 | `Window:SetMinimizeKey(KeyCode or name)` | Changes the show/hide key. |
 | `Window:Search(text)` | Runs the toolbar search programmatically. |
+| `Window:AddCommand({ Title, Description, Icon, IconColor, Keywords, Shortcut, Callback })` | Adds an action to Spotlight (listed before you type, and found by title, description or keywords). `Shortcut` also runs it from the keyboard. Returns a command with `:Run()`, `:SetShortcut(key)` and `:Destroy()`. |
+| `Window:FinishLoading(text)` | Opens a window created with `Loading`. `Window.Loader` is its loading card. |
 
 Tabs have `Tab:SetBadge(number | text | nil)`, `Tab:SetTitle(text)` and `Tab:Select()`.
 
@@ -147,6 +167,11 @@ local Section = Tab:AddSection({ Title = "Movement", Description = "Applies inst
 ```
 
 Elements added to a section go into its rounded group. Elements added straight to a tab go into a group without a header.
+
+```lua
+local Advanced = Tab:AddSection({ Title = "Advanced", Collapsible = true, Collapsed = true })
+Advanced:SetCollapsed(false)   -- click the title to fold it; search results and Window:Reveal open it
+```
 
 ## Elements
 
@@ -192,6 +217,21 @@ Section:AddParagraph({ Title = "About", Content = "Longer text, <b>rich text</b>
 local Bar = Section:AddProgress("Quest", { Title = "Quest progress", Max = 25, Default = 0 })         -- Bar:SetValue(10)
 Section:AddCode({ Title = "Loader", Code = 'loadstring(game:HttpGet("…"))()' })                     -- with a copy button
 Section:AddImage({ Title = "Map", Image = "rbxassetid://…", Height = 150, ScaleType = "Crop" })
+
+-- Live bar graph: shows the latest value and the average. Min/Max fix the scale (automatic otherwise).
+local Fps = Section:AddGraph("Fps", { Title = "Frame rate", Points = 40, Min = 0, Suffix = " fps", Height = 76 })
+Fps:Push(60)                                -- also :SetValues(list), :Clear(), :SetRange(min, max)
+
+-- Table: click a header to sort, click a row to select it
+local Players = Section:AddTable("Players", {
+    Title = "Players",
+    Columns = { "Name", { Title = "Level", Align = "Right", Width = 0.5 } },  -- Width: share of the row (default 1)
+    Rows = { { "Builderman", 90 }, { Name = "Noob", Level = 3 } },   -- arrays, or tables keyed by column title
+    MaxRows = 6, SortBy = "Level", Descending = true,
+    Callback = function(row, index) end,
+})
+Players:AddRow({ "Guest", 1 })              -- also :SetRows(list), :RemoveRow(row or index), :Clear(),
+                                            -- :SortBy(column, descending), :Select(row or index), :GetSelected()
 ```
 
 ### Options every element accepts
@@ -209,6 +249,16 @@ Section:AddImage({ Title = "Map", Image = "rbxassetid://…", Height = 150, Scal
 Every element has `:SetTitle(text)`, `:SetDesc(text)`, `:SetVisible(bool)`, `:SetDisabled(bool)` (also `:Lock()` and `:Unlock()`), `:OnChanged(fn)` and `:Destroy()`. Value elements expose `.Value`, `:SetValue(...)`, `:Reset()`, `:IsDefault()` and `:GetText()`. Toggles and buttons have `:SetShortcut(key)` (`nil` removes it) and `:RecordShortcut()`. Dropdowns, segmented controls and radio groups also have `:SetValues(list)`, and dropdowns have `:Open()`.
 
 `MacUI.OptionChanged` fires `(index, value, element)` whenever any indexed element changes.
+
+### Undo
+
+Changes the user makes to indexed toggles, sliders, menus, text fields, keybinds, colours, segmented controls, steppers and radio groups are recorded. Changes made in the same moment (a slider drag, a loaded profile, a toggle and its knock-on effects) undo as one step. Changes your script makes on its own aren't recorded.
+
+```lua
+MacUI:Undo()  MacUI:Redo()                  -- also Ctrl/Cmd + Z, Ctrl/Cmd + Shift + Z and Ctrl + Y
+MacUI:CanUndo()  MacUI:CanRedo()  MacUI:ClearHistory()
+MacUI:SetUndoEnabled(false)
+```
 
 ## Notifications, toasts & dialogs
 
@@ -237,6 +287,22 @@ Window:Dialog({
         { Title = "Cancel" },
     },
 })
+
+-- Watermark: a small draggable capsule on top of the game
+local Mark = MacUI:SetWatermark({
+    Text = "My Hub",                 -- or a function returning text
+    Icon = "command",
+    Position = "TopCenter",          -- TopLeft, TopCenter, TopRight, BottomLeft, BottomCenter, BottomRight
+    Fps = true, Ping = true, Clock = false,
+})
+Mark:SetText("My Hub · Farming")     -- also :SetVisible(bool) and :Destroy(); MacUI:SetWatermark(false) removes it
+
+-- Loading card on its own (CreateWindow's Loading option uses this)
+local Loader = MacUI:ShowLoading({ Title = "My Hub", Subtitle = "Loading…", Icon = "command" })
+Loader:SetProgress(0.6, "Fetching data…")   -- the bar sweeps until the first SetProgress
+Loader:Finish("Done")                       -- fills the bar and fades out; :Close() hides it at once
+
+MacUI:SetClipboard("text")           -- false when the executor has no clipboard function
 ```
 
 ## Themes & accents
@@ -252,9 +318,12 @@ MacUI.ThemeChanged:Connect(function(name) end)
 -- your own theme: start from an existing one and override any colour token
 MacUI:AddTheme("Ocean", { Background = Color3.fromRGB(12, 30, 48), Sidebar = Color3.fromRGB(16, 38, 60) }, "Dark")
 MacUI:SetTheme("Ocean")
+MacUI:RemoveTheme("Ocean")                  -- the built-in themes stay
+MacUI:PreviewTheme({ Background = Color3.new(0, 0, 0) })   -- try colours without saving; SetTheme(MacUI.ThemeName) goes back
+MacUI.ThemesChanged:Connect(function(names) end)           -- a theme was added or removed
 ```
 
-The tokens are the keys of `MacUI.Themes.Dark`.
+The tokens are the keys of `MacUI.Themes.Dark`. Adding a theme again under the same name updates it on screen straight away.
 
 ## Addons
 
@@ -272,15 +341,32 @@ SaveManager:SetLibrary(MacUI)
 SaveManager:SetFolder("MyHub/" .. game.PlaceId)
 SaveManager:IgnoreThemeSettings()
 SaveManager:BuildConfigSection(SettingsTab)
--- create/load/overwrite profiles, autoload, and "Save changes automatically"
+-- create/load/overwrite profiles, autoload, "Save changes automatically",
+-- and Share / Import buttons that copy and paste a profile code
 SaveManager:LoadAutoloadConfig()
+
+local code = SaveManager:ExportConfig()          -- the current settings as text
+local ok, reason = SaveManager:ImportConfig(code)
 ```
 
-Profiles also store toggle and button shortcuts, steppers and radio groups. `ThemeManager` (`BuildThemeSection`, `ApplyTheme`, `SaveDefault`/`LoadDefault`) and `AccentManager` (`ChangeAccent`, `BuildAccentDropdown`, `BuildAccentPicker`) are optional helpers. They also keep the MacUI v3 calls working.
+Profiles also store toggle and button shortcuts, steppers and radio groups.
+
+**Theme editor.** `ThemeManager:BuildThemeEditor(tab)` adds a folded "Theme editor" section: pick a starting theme, change the window, sidebar, group, control and text colours with a live preview, then save it under a name. Saved themes go in `<folder>/themes` and show up in every theme menu. Load them before building the Interface section, so its theme picker is built with them:
+
+```lua
+local ThemeManager = loadstring(game:HttpGet(BASE .. "ThemeManager.lua"))()
+ThemeManager:SetLibrary(MacUI)
+ThemeManager:SetFolder("MyHub")
+ThemeManager:LoadCustomThemes()                  -- before InterfaceManager:BuildInterfaceSection
+ThemeManager:BuildThemeEditor(SettingsTab)
+-- from code: ThemeManager:SaveCustomTheme(name, { Background = Color3… }, "Dark"), ThemeManager:DeleteCustomTheme(name)
+```
+
+`ThemeManager` also has `BuildThemeSection`, `ApplyTheme` and `SaveDefault`/`LoadDefault`, and `AccentManager` has `ChangeAccent`, `BuildAccentDropdown` and `BuildAccentPicker`. Both are optional helpers that also keep MacUI v3 calls working.
 
 ## Coming from Fluent?
 
-Change the loadstring and it should run: `CreateWindow`, `AddTab`, `AddSection`, every `Add*` element, `Options`, `Notify`, `Dialog`, `SaveManager` and `InterfaceManager` behave the same. Everything else above (Spotlight, context menus, shortcuts, dependencies, tooltips, page headers, steppers, radio groups, code blocks, frosted glass and so on) is extra.
+Change the loadstring and it should run: `CreateWindow`, `AddTab`, `AddSection`, every `Add*` element, `Options`, `Notify`, `Dialog`, `SaveManager` and `InterfaceManager` behave the same. Everything else above (Spotlight and commands, undo, context menus, shortcuts, dependencies, tooltips, page headers, collapsible sections, steppers, radio groups, graphs, tables, code blocks, the loading screen, the watermark, frosted glass and so on) is extra.
 
 ## Icons
 
