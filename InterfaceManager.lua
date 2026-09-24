@@ -8,6 +8,9 @@
 	InterfaceManager:SetLibrary(MacUI)
 	InterfaceManager:SetFolder("MyHub")
 	InterfaceManager:BuildInterfaceSection(Tabs.Settings)
+
+	Only settings the user changes are written to options.json; everything
+	else keeps following the window's own CreateWindow config.
 ]]
 
 local HttpService = game:GetService("HttpService")
@@ -15,6 +18,7 @@ local HttpService = game:GetService("HttpService")
 local InterfaceManager = {
 	Library = nil,
 	Folder = "MacUI",
+	-- The values in effect. Filled from the window when the section is built.
 	Settings = {
 		Theme = "Dark",
 		Accent = "Blue",
@@ -26,6 +30,8 @@ local InterfaceManager = {
 		RememberWindow = true,
 		Window = nil, -- last position, size, page and sidebar state
 	},
+	-- The subset the user chose (or that options.json already had).
+	Saved = {},
 }
 InterfaceManager.__index = InterfaceManager
 
@@ -64,7 +70,14 @@ function InterfaceManager:SaveSettings()
 		return
 	end
 	self:BuildFolderTree()
-	writefile(self.Folder .. "/options.json", HttpService:JSONEncode(self.Settings))
+	writefile(self.Folder .. "/options.json", HttpService:JSONEncode(self.Saved))
+end
+
+-- Records a choice the user made and saves it.
+function InterfaceManager:Set(key, value)
+	self.Settings[key] = value
+	self.Saved[key] = value
+	self:SaveSettings()
 end
 
 function InterfaceManager:LoadSettings()
@@ -79,6 +92,7 @@ function InterfaceManager:LoadSettings()
 	if ok and type(data) == "table" then
 		for key, value in pairs(data) do
 			self.Settings[key] = value
+			self.Saved[key] = value
 		end
 	end
 end
@@ -87,30 +101,45 @@ function InterfaceManager:BuildInterfaceSection(tab)
 	assert(self.Library, "[InterfaceManager] call SetLibrary(MacUI) first")
 	local library = self.Library
 	local settings = self.Settings
-	-- The window's own config is the default until the user changes it here.
-	local first = library.Windows and library.Windows[1]
-	if first then
-		settings.Acrylic = first.Acrylic == true
-		settings.ShortcutList = first.KeybindListVisible == true
-	end
-	settings.ReduceMotion = library.ReduceMotion == true
-	self:LoadSettings()
+	local saved = self.Saved
+	-- Controls report their initial values while they're built; only changes
+	-- made after that are the user's and get saved.
+	local ready = false
 
-	-- Apply the saved values before the controls are built.
-	if library.Themes[settings.Theme] then
-		library:SetTheme(settings.Theme, true)
-	end
-	if library.Accents[settings.Accent] then
-		library:SetAccent(settings.Accent, true)
-	end
-	library:SetMinimizeKey(settings.MenuKeybind)
-	if library.SetReduceMotion then
-		library:SetReduceMotion(settings.ReduceMotion == true)
-	end
 	local function EachWindow(fn)
 		for _, window in ipairs(library.Windows or {}) do
 			fn(window)
 		end
+	end
+
+	-- Start from what the window is actually using...
+	settings.Theme = library.ThemeName or settings.Theme
+	for name, color in pairs(library.Accents) do
+		if color == library.Accent then
+			settings.Accent = name
+		end
+	end
+	settings.ReduceMotion = library.ReduceMotion == true
+	local first = library.Windows and library.Windows[1]
+	if first then
+		settings.Acrylic = first.Acrylic == true
+		settings.ShortcutList = first.KeybindListVisible == true
+		settings.MenuKeybind = first.MinimizeKey and first.MinimizeKey.Name or "None"
+		settings.Scale = math.clamp(math.floor((first.Scale or 1) * 20 + 0.5) * 5, 60, 130)
+	end
+	-- ...then apply what the user chose last time.
+	self:LoadSettings()
+	if saved.Theme and library.Themes[saved.Theme] then
+		library:SetTheme(saved.Theme, true)
+	end
+	if saved.Accent and library.Accents[saved.Accent] then
+		library:SetAccent(saved.Accent, true)
+	end
+	if saved.MenuKeybind then
+		library:SetMinimizeKey(saved.MenuKeybind)
+	end
+	if saved.ReduceMotion ~= nil and library.SetReduceMotion then
+		library:SetReduceMotion(saved.ReduceMotion == true)
 	end
 
 	local section = tab:AddSection({
@@ -127,8 +156,9 @@ function InterfaceManager:BuildInterfaceSection(tab)
 			if value ~= library.ThemeName then
 				library:SetTheme(value)
 			end
-			settings.Theme = value
-			self:SaveSettings()
+			if ready then
+				self:Set("Theme", value)
+			end
 		end,
 	})
 
@@ -139,9 +169,13 @@ function InterfaceManager:BuildInterfaceSection(tab)
 		Values = accentNames,
 		Default = table.find(accentNames, settings.Accent) and settings.Accent or "Blue",
 		Callback = function(value)
-			library:SetAccent(value)
-			settings.Accent = value
-			self:SaveSettings()
+			-- a custom Color3 accent shows as "Blue" here until the user picks one
+			if ready then
+				if library.Accents[value] and library.Accents[value] ~= library.Accent then
+					library:SetAccent(value)
+				end
+				self:Set("Accent", value)
+			end
 		end,
 	})
 
@@ -169,6 +203,9 @@ function InterfaceManager:BuildInterfaceSection(tab)
 					applied = window:SetAcrylic(value) and applied
 				end
 			end)
+			if not ready then
+				return
+			end
 			if value and not applied then
 				library:Notify({
 					Title = "Frosted glass unavailable",
@@ -178,14 +215,10 @@ function InterfaceManager:BuildInterfaceSection(tab)
 					Duration = 5,
 				})
 			end
-			if settings.Acrylic ~= value then
-				settings.Acrylic = value
-				self:SaveSettings()
-			end
+			self:Set("Acrylic", value)
 		end,
 	})
 
-	local scaleReady = false
 	section:AddSlider("InterfaceScale", {
 		Title = "Interface size",
 		Description = "Scale the whole window.",
@@ -196,16 +229,14 @@ function InterfaceManager:BuildInterfaceSection(tab)
 		Suffix = "%",
 		Finished = true, -- rescale once the drag ends, not on every step
 		Callback = function(value)
-			settings.Scale = value
-			if scaleReady then
+			if ready then
 				library:SetScale(value / 100)
-				self:SaveSettings()
+				self:Set("Scale", value)
 			end
 		end,
 	})
-	scaleReady = true
-	if settings.Scale and settings.Scale ~= 100 then
-		library:SetScale(settings.Scale / 100)
+	if saved.Scale then
+		library:SetScale(saved.Scale / 100)
 	end
 
 	section:AddToggle("InterfaceReduceMotion", {
@@ -214,9 +245,8 @@ function InterfaceManager:BuildInterfaceSection(tab)
 		Default = settings.ReduceMotion == true,
 		Callback = function(value)
 			library:SetReduceMotion(value)
-			if settings.ReduceMotion ~= value then
-				settings.ReduceMotion = value
-				self:SaveSettings()
+			if ready then
+				self:Set("ReduceMotion", value)
 			end
 		end,
 	})
@@ -231,9 +261,8 @@ function InterfaceManager:BuildInterfaceSection(tab)
 					window:SetKeybindList(value)
 				end
 			end)
-			if settings.ShortcutList ~= value then
-				settings.ShortcutList = value
-				self:SaveSettings()
+			if ready then
+				self:Set("ShortcutList", value)
 			end
 		end,
 	})
@@ -243,13 +272,14 @@ function InterfaceManager:BuildInterfaceSection(tab)
 		Description = "Reopen at the same size, position and page.",
 		Default = settings.RememberWindow ~= false,
 		Callback = function(value)
-			if settings.RememberWindow ~= value then
-				settings.RememberWindow = value
-				if not value then
-					settings.Window = nil
-				end
-				self:SaveSettings()
+			if not ready then
+				return
 			end
+			if not value then
+				settings.Window = nil
+				saved.Window = nil
+			end
+			self:Set("RememberWindow", value)
 		end,
 	})
 	EachWindow(function(window)
@@ -257,15 +287,14 @@ function InterfaceManager:BuildInterfaceSection(tab)
 			return
 		end
 		window.StateChanged:Connect(function(state)
-			if settings.RememberWindow ~= false then
-				settings.Window = state
-				self:SaveSettings()
+			if ready and settings.RememberWindow ~= false then
+				self:Set("Window", state)
 			end
 		end)
-		if settings.RememberWindow ~= false and type(settings.Window) == "table" then
+		if settings.RememberWindow ~= false and type(saved.Window) == "table" then
 			-- deferred so the script can finish adding tabs first
 			task.defer(function()
-				window:ApplyState(settings.Window)
+				window:ApplyState(saved.Window)
 			end)
 		end
 	end)
@@ -279,7 +308,9 @@ function InterfaceManager:BuildInterfaceSection(tab)
 	keybind:OnChanged(function(key)
 		settings.MenuKeybind = key
 		library:SetMinimizeKey(key)
-		self:SaveSettings()
+		if ready then
+			self:Set("MenuKeybind", key)
+		end
 	end)
 	library.MinimizeKeybind = keybind
 
@@ -292,6 +323,7 @@ function InterfaceManager:BuildInterfaceSection(tab)
 			library:Destroy()
 		end,
 	})
+	ready = true
 	return section
 end
 

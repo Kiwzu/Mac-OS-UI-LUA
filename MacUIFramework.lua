@@ -355,18 +355,38 @@ local ShortcutsChanged = Signal.new()
 
 -- Set while a keybind is recording so the same key press doesn't also
 -- trigger other keybinds or the window's show/hide key.
-local KeyCapture = { Active = false }
+local KeyCapture = { Active = false, Token = 0, EndedAt = -1 }
 
--- Records the next key press. `done(key)` receives a KeyCode name, "MB2"/"MB3",
--- "None" (Backspace/Delete clears) or false (Escape or a click cancels).
-local function CaptureKey(done)
+-- Records the next key press. `done(key)` receives a KeyCode name, "MB2"/"MB3"
+-- (keyboard-only captures treat those as cancel), "None" (Backspace/Delete
+-- clears) or false (Escape or a click cancels). Returns a handle whose
+-- Disconnect() abandons the capture without calling `done`.
+local function CaptureKey(done, keyboardOnly)
+	KeyCapture.Token += 1
+	local token = KeyCapture.Token
 	KeyCapture.Active = true
 	local connection
+	local function Finish()
+		if connection then
+			connection:Disconnect()
+			connection = nil
+		end
+		KeyCapture.EndedAt = os.clock()
+		-- keep the guard up until every other handler has seen this key press,
+		-- unless a newer capture has started in the meantime
+		task.delay(0.1, function()
+			if KeyCapture.Token == token then
+				KeyCapture.Active = false
+			end
+		end)
+	end
 	connection = UserInputService.InputBegan:Connect(function(input)
 		local key
 		local kind = input.UserInputType
 		if kind == Enum.UserInputType.Keyboard then
-			if input.KeyCode == Enum.KeyCode.Escape then
+			if input.KeyCode == Enum.KeyCode.None then
+				return
+			elseif input.KeyCode == Enum.KeyCode.Escape then
 				key = false
 			elseif input.KeyCode == Enum.KeyCode.Backspace or input.KeyCode == Enum.KeyCode.Delete then
 				key = "None"
@@ -376,20 +396,28 @@ local function CaptureKey(done)
 		elseif kind == Enum.UserInputType.MouseButton1 or kind == Enum.UserInputType.Touch then
 			key = false -- clicking anywhere cancels, like the macOS shortcut recorder
 		elseif kind == Enum.UserInputType.MouseButton2 then
-			key = "MB2"
+			key = not keyboardOnly and "MB2" or false
 		elseif kind == Enum.UserInputType.MouseButton3 then
-			key = "MB3"
+			key = not keyboardOnly and "MB3" or false
 		else
 			return
 		end
-		connection:Disconnect()
-		-- keep the guard up until every other handler has seen this key press
-		task.delay(0.1, function()
-			KeyCapture.Active = false
-		end)
+		Finish()
 		done(key)
 	end)
-	return connection
+	local handle = {}
+	function handle:Disconnect()
+		if connection then
+			Finish()
+		end
+	end
+	return handle
+end
+
+-- True for a moment after a capture ends, so the click that ended it isn't
+-- also taken as a click on what's under the mouse (a key cap would re-arm).
+local function JustCaptured()
+	return os.clock() - KeyCapture.EndedAt < 0.35
 end
 
 local function KeyMatches(input, key)
@@ -1066,8 +1094,11 @@ function MacUI:Notify(config)
 			local push = PushButton(actions, spec.Title or "OK", spec.Style or (index == 1 and "Primary" or "Default"), 24)
 			push.Instance.LayoutOrder = index
 			push.Instance.MouseButton1Click:Connect(function()
-				Spawn(spec.Callback)
+				if banner.Closing then
+					return
+				end
 				banner:Close()
+				Spawn(spec.Callback)
 			end)
 		end
 	end
@@ -1331,7 +1362,7 @@ local function CreateRow(container, info, options)
 			Restyle(row.Highlight, 0.2)
 		end)
 		row.Hitbox.MouseButton1Click:Connect(function()
-			if not row.Disabled and row.OnClick then
+			if not row.Disabled and row.OnClick and not JustCaptured() then
 				row.OnClick()
 			end
 		end)
@@ -1516,6 +1547,10 @@ end
 
 function RowMethods:Destroy()
 	self.Destroyed = true
+	if self.Capture then
+		self.Capture:Disconnect()
+		self.Capture = nil
+	end
 	for index = #Dependencies, 1, -1 do
 		if Dependencies[index].Row == self then
 			table.remove(Dependencies, index)
@@ -1570,8 +1605,14 @@ function RowMethods:Flash()
 end
 
 function RowMethods:_BindContext(button)
-	self:Connect(button.MouseButton2Click, function()
+	-- plain connections: `button` is inside the row and is destroyed with it
+	button.MouseButton2Click:Connect(function()
 		self:_OpenContextMenu()
+	end)
+	button.TouchLongPress:Connect(function(positions, state)
+		if state == Enum.UserInputState.Begin then
+			self:_OpenContextMenu(positions and positions[1])
+		end
 	end)
 end
 
@@ -1658,6 +1699,9 @@ function RowMethods:_ContextItems()
 end
 
 function RowMethods:_OpenContextMenu(point)
+	if KeyCapture.Active or JustCaptured() or self.Destroyed then
+		return
+	end
 	local now = os.clock()
 	if now - (self.LastContext or 0) < 0.2 then
 		return
@@ -1700,7 +1744,7 @@ function RowMethods:_RenderShortcut()
 		end)
 		New("UISizeConstraint", { MinSize = Vector2.new(24, 20), Parent = cap })
 		cap.MouseButton1Click:Connect(function()
-			if self.Element and not self.Disabled then
+			if self.Element and not self.Disabled and not self.RecordingShortcut and not JustCaptured() then
 				self.Element:RecordShortcut()
 			end
 		end)
@@ -1807,6 +1851,9 @@ end
 
 -- Binds a key that activates this element (toggles and buttons).
 function ElementBase:SetShortcut(key)
+	if self.Row.Destroyed then
+		return
+	end
 	if typeof(key) == "EnumItem" then
 		key = key.Name
 	end
@@ -1820,8 +1867,9 @@ function ElementBase:SetShortcut(key)
 		row.ShortcutConnection = nil
 	end
 	if key then
-		row.ShortcutConnection = row:Connect(UserInputService.InputBegan, function(input)
-			if KeyCapture.Active or row.Disabled or row.DependencyHidden or UserInputService:GetFocusedTextBox() then
+		row.ShortcutConnection = row:Connect(UserInputService.InputBegan, function(input, processed)
+			-- `processed` covers typing in chat and clicks on other interfaces
+			if processed or KeyCapture.Active or row.Disabled or row.DependencyHidden or UserInputService:GetFocusedTextBox() then
 				return
 			end
 			if KeyMatches(input, key) and self._Activate then
@@ -1843,14 +1891,19 @@ function ElementBase:RecordShortcut()
 	end
 	row.RecordingShortcut = true
 	row:_RenderShortcut()
-	CaptureKey(function(key)
+	-- keyboard only: a right-click shortcut would fire on every context-menu click
+	row.Capture = CaptureKey(function(key)
+		row.Capture = nil
 		row.RecordingShortcut = false
+		if row.Destroyed then
+			return
+		end
 		if key == false then
 			row:_RenderShortcut()
 			return
 		end
 		self:SetShortcut(key)
-	end)
+	end, true)
 end
 
 function ElementBase:Destroy()
@@ -2901,25 +2954,29 @@ function Container:AddKeybind(idx, info)
 		Restyle(cap, 0.18)
 	end)
 	cap.MouseButton1Click:Connect(function()
-		if row.Disabled or Keybind.Picking then
+		if row.Disabled or Keybind.Picking or JustCaptured() then
 			return
 		end
 		Keybind.Picking = true
 		Render()
-		local connection = CaptureKey(function(key)
+		row.Capture = CaptureKey(function(key)
+			row.Capture = nil
 			Keybind.Picking = false
+			if row.Destroyed then
+				return
+			end
 			if key == false or key == Keybind.Value then
 				Render()
 				return
 			end
 			Keybind:SetValue(key)
 		end)
-		table.insert(row.Connections, connection)
 	end)
 
 	local holding = false
-	row:Connect(UserInputService.InputBegan, function(input)
-		if Keybind.Picking or KeyCapture.Active or row.Disabled or row.DependencyHidden or UserInputService:GetFocusedTextBox() then
+	row:Connect(UserInputService.InputBegan, function(input, processed)
+		-- `processed` covers typing in chat and clicks on other interfaces
+		if processed or Keybind.Picking or KeyCapture.Active or row.Disabled or row.DependencyHidden or UserInputService:GetFocusedTextBox() then
 			return
 		end
 		if Matches(input) then
@@ -3280,7 +3337,8 @@ function Container:AddColorpicker(idx, info)
 		return self.Value:ToHex() == self.DefaultColor:ToHex() and self.Transparency == self.DefaultTransparency
 	end
 	function Picker:_Reset()
-		self:SetValueRGB(self.DefaultColor, self.DefaultTransparency)
+		self.Transparency = self.DefaultTransparency
+		self:SetValueRGB(self.DefaultColor)
 	end
 	function Picker:_Text()
 		return "#" .. self.Value:ToHex():upper()
@@ -3849,6 +3907,16 @@ function Container:AddCode(idx, info)
 end
 
 -- Full-width picture (banners, previews). Title/Description show underneath.
+local function ResolveScaleType(value)
+	if typeof(value) == "EnumItem" and value.EnumType == Enum.ScaleType then
+		return value
+	end
+	local ok, item = pcall(function()
+		return Enum.ScaleType[tostring(value or "Crop")]
+	end)
+	return ok and item or Enum.ScaleType.Crop
+end
+
 function Container:AddImage(idx, info)
 	idx, info = ParseArgs(idx, info)
 	local row = CreateRow(self, {
@@ -3868,7 +3936,7 @@ function Container:AddImage(idx, info)
 		Name = "Image",
 		Image = MacUI:GetIcon(info.Image) or tostring(info.Image or ""),
 		Size = UDim2.new(1, 0, 0, info.Height or 150),
-		ScaleType = Enum.ScaleType[info.ScaleType or "Crop"],
+		ScaleType = ResolveScaleType(info.ScaleType),
 		BackgroundTransparency = 0,
 		LayoutOrder = -2,
 		Theme = { BackgroundColor3 = "Field" },
@@ -4241,13 +4309,13 @@ end
 function MacUI:CreateWindow(config)
 	config = config or {}
 	-- Re-running a script shouldn't stack a second copy of its window.
-	if config.ReplaceExisting ~= false and type(shared) == "table" then
+	if config.ReplaceExisting ~= false and config.Title ~= nil and type(shared) == "table" then
 		local registry = shared.__MacUIWindows
 		if type(registry) ~= "table" then
 			registry = {}
 			shared.__MacUIWindows = registry
 		end
-		local key = tostring(config.Title or "MacUI")
+		local key = tostring(config.Title)
 		local previous = registry[key]
 		if previous and previous ~= self and not previous.Unloaded then
 			pcall(previous.Destroy, previous)
@@ -6189,6 +6257,9 @@ function MacUI:CreateWindow(config)
 	end
 
 	local function EndTransition()
+		if MacUI.Unloaded then
+			return
+		end
 		Holder.Parent = Root
 		AnimGroup.Visible = false
 	end
@@ -6554,6 +6625,9 @@ function MacUI:CreateWindow(config)
 			push.Instance.TextSize = 13
 			push.Instance.LayoutOrder = stacked and index or (count - index + 1)
 			push.Instance.MouseButton1Click:Connect(function()
+				if dialog.Closed then
+					return
+				end
 				dialog:Close()
 				Spawn(spec.Callback, inputBox and inputBox.Text or nil)
 			end)
@@ -6633,7 +6707,10 @@ function MacUI:CreateWindow(config)
 		if not element or element.Type == "Paragraph" or element.Type == "Code" or element.Type == "Image" then
 			return nil
 		elseif element.Type == "Button" then
-			return entry.Row.Disabled and nil or "Run"
+			if entry.Row.Disabled then
+				return nil
+			end
+			return "Run"
 		end
 		local ok, text = pcall(element.GetText, element)
 		return ok and text or nil
@@ -6745,6 +6822,7 @@ function MacUI:CreateWindow(config)
 		local scale = Window.Scale
 		local width, searchHeight, itemHeight, maxVisible = 580, 54, 46, 7
 		local results, items, selected = {}, {}, 1
+		local pointerMoved, renderMouse = false, MousePosition()
 		local connections = {}
 
 		local overlay = New("TextButton", {
@@ -6866,10 +6944,12 @@ function MacUI:CreateWindow(config)
 			Parent = listContent,
 		})
 
+		local closed = false
 		local function Close()
-			if not Spotlight.Open then
+			if closed then
 				return
 			end
+			closed = true
 			Spotlight.Open = false
 			Spotlight.Close = nil
 			for _, connection in ipairs(connections) do
@@ -6888,6 +6968,9 @@ function MacUI:CreateWindow(config)
 		Spotlight.Close = Close
 
 		local function Activate(entry, reveal)
+			if closed then
+				return
+			end
 			Close()
 			if entry.Kind == "Tab" then
 				Window:SelectTab(entry.Tab)
@@ -6925,6 +7008,7 @@ function MacUI:CreateWindow(config)
 			table.clear(items)
 			results = SpotlightSearch(box.Text)
 			selected = math.clamp(selected, 1, math.max(#results, 1))
+			pointerMoved, renderMouse = false, MousePosition()
 			for index, entry in ipairs(results) do
 				local item = { Entry = entry, Selected = false }
 				local function Foreground(normal)
@@ -6985,12 +7069,17 @@ function MacUI:CreateWindow(config)
 						Parent = item.Button,
 					}))
 				end
-				item.Button.MouseEnter:Connect(function()
-					if selected ~= index then
+				local function Hover()
+					if not pointerMoved and (MousePosition() - renderMouse).Magnitude > 1 then
+						pointerMoved = true
+					end
+					if pointerMoved and selected ~= index then
 						selected = index
 						Paint()
 					end
-				end)
+				end
+				item.Button.MouseEnter:Connect(Hover)
+				item.Button.MouseMoved:Connect(Hover)
 				item.Button.MouseButton1Click:Connect(function()
 					Activate(entry, false)
 				end)
@@ -7003,6 +7092,11 @@ function MacUI:CreateWindow(config)
 			Paint()
 		end
 
+		table.insert(connections, UserInputService.InputChanged:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseMovement then
+				pointerMoved = true
+			end
+		end))
 		table.insert(connections, UserInputService.InputBegan:Connect(function(input)
 			if input.KeyCode == Enum.KeyCode.Down then
 				selected = math.min(selected + 1, math.max(#results, 1))
@@ -7258,7 +7352,11 @@ function MacUI:CreateWindow(config)
 				end
 			end)
 			Connect(ShortcutsChanged, QueueShortcutRefresh)
-			Connect(MacUI.OptionChanged, QueueShortcutRefresh)
+			Connect(MacUI.OptionChanged, function(_, _, element)
+				if element and (element.Type == "Toggle" or element.Type == "Keybind") then
+					QueueShortcutRefresh()
+				end
+			end)
 		end
 		if ShortcutPanel then
 			ShortcutPanel.Holder.Visible = visible
@@ -7275,8 +7373,25 @@ function MacUI:CreateWindow(config)
 		HideTooltip()
 	end
 
+	local MODIFIER_KEYS = {
+		[Enum.KeyCode.LeftControl] = true,
+		[Enum.KeyCode.RightControl] = true,
+		[Enum.KeyCode.LeftShift] = true,
+		[Enum.KeyCode.RightShift] = true,
+		[Enum.KeyCode.LeftAlt] = true,
+		[Enum.KeyCode.RightAlt] = true,
+		[Enum.KeyCode.LeftSuper] = true,
+		[Enum.KeyCode.RightSuper] = true,
+		[Enum.KeyCode.LeftMeta] = true,
+		[Enum.KeyCode.RightMeta] = true,
+	}
+	local pendingToggle
+
 	Connect(UserInputService.InputBegan, function(input, processed)
-		if KeyCapture.Active or UserInputService:GetFocusedTextBox() then
+		if pendingToggle and input.KeyCode ~= pendingToggle then
+			pendingToggle = nil -- another key or a click while holding it: a chord
+		end
+		if processed or KeyCapture.Active or UserInputService:GetFocusedTextBox() then
 			return
 		end
 		if config.Spotlight ~= false and input.KeyCode == (config.SpotlightKey or Enum.KeyCode.K) then
@@ -7296,11 +7411,21 @@ function MacUI:CreateWindow(config)
 				return
 			end
 		end
-		if processed then
-			return
-		end
 		if Window.MinimizeKey and input.KeyCode == Window.MinimizeKey then
-			Window:Toggle()
+			if MODIFIER_KEYS[input.KeyCode] then
+				pendingToggle = input.KeyCode
+			else
+				Window:Toggle()
+			end
+		end
+	end)
+
+	Connect(UserInputService.InputEnded, function(input)
+		if pendingToggle and input.KeyCode == pendingToggle then
+			pendingToggle = nil
+			if not KeyCapture.Active and not MacUI.Unloaded then
+				Window:Toggle()
+			end
 		end
 	end)
 

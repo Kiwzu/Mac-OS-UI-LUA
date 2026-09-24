@@ -11,7 +11,7 @@
 	SaveManager:LoadAutoloadConfig()
 
 	Toggle and button shortcuts are saved too, and "Save changes
-	automatically" keeps the autoload profile up to date as you play.
+	automatically" keeps the current profile up to date as you play.
 ]]
 
 local HttpService = game:GetService("HttpService")
@@ -22,7 +22,23 @@ local SaveManager = {
 	Ignore = {},
 	Loading = false,
 	Autosave = false,
+	-- The profile last loaded or saved; autosave writes here.
+	ActiveProfile = nil,
+	-- Autosave waits until the saved state has been loaded, so values that
+	-- are still being set up never overwrite a profile.
+	Ready = false,
 }
+
+-- Shortcuts are stored as a key name, or "None" when removed.
+local function ApplyShortcut(option, shortcut)
+	if type(shortcut) ~= "string" or not option.SetShortcut then
+		return
+	end
+	local want = shortcut ~= "None" and shortcut or nil
+	if option.Shortcut ~= want then
+		option:SetShortcut(want)
+	end
+end
 SaveManager.__index = SaveManager
 
 local function FileApi()
@@ -36,7 +52,7 @@ end
 SaveManager.Parser = {
 	Toggle = {
 		Save = function(idx, object)
-			return { type = "Toggle", idx = idx, value = object.Value, shortcut = object.Shortcut }
+			return { type = "Toggle", idx = idx, value = object.Value, shortcut = object.Shortcut or "None" }
 		end,
 		Load = function(idx, data)
 			local option = SaveManager.Library.Options[idx]
@@ -46,21 +62,17 @@ SaveManager.Parser = {
 			if option.Value ~= data.value then
 				option:SetValue(data.value)
 			end
-			if type(data.shortcut) == "string" and option.SetShortcut and option.Shortcut ~= data.shortcut then
-				option:SetShortcut(data.shortcut)
-			end
+			ApplyShortcut(option, data.shortcut)
 		end,
 	},
 	Button = {
 		Save = function(idx, object)
-			if object.Shortcut then
-				return { type = "Button", idx = idx, shortcut = object.Shortcut }
-			end
+			return { type = "Button", idx = idx, shortcut = object.Shortcut or "None" }
 		end,
 		Load = function(idx, data)
 			local option = SaveManager.Library.Options[idx]
-			if option and option.SetShortcut and type(data.shortcut) == "string" then
-				option:SetShortcut(data.shortcut)
+			if option then
+				ApplyShortcut(option, data.shortcut)
 			end
 		end,
 	},
@@ -224,6 +236,8 @@ function SaveManager:Save(name)
 		return false, "failed to encode data"
 	end
 	writefile(self.Folder .. "/settings/" .. name .. ".json", encoded)
+	self.ActiveProfile = name
+	self.Ready = true
 	return true
 end
 
@@ -242,6 +256,8 @@ function SaveManager:Load(name)
 	if not ok or type(decoded) ~= "table" then
 		return false, "config is corrupted"
 	end
+	self.ActiveProfile = name
+	self.Ready = true
 	-- changes made while loading shouldn't trigger an autosave
 	self.Loading = true
 	for _, entry in ipairs(decoded.objects or {}) do
@@ -301,8 +317,8 @@ function SaveManager:SetAutoloadConfig(name)
 	return true
 end
 
--- Saves to the autoload profile (creating "Autosave" if there is none)
--- a moment after any saved option changes.
+-- A moment after a saved option changes, writes the current profile (the
+-- one last loaded or saved, else the autoload one, else a new "Autosave").
 function SaveManager:SetAutosave(enabled)
 	self.Autosave = enabled == true
 	if FileApi() then
@@ -313,9 +329,12 @@ function SaveManager:SetAutosave(enabled)
 		return
 	end
 	local queued = false
-	self.AutosaveConnection = self.Library.OptionChanged:Connect(function(idx)
-		if not self.Autosave or self.Loading or self.Ignore[idx] or queued then
+	self.AutosaveConnection = self.Library.OptionChanged:Connect(function(idx, _, element)
+		if not self.Autosave or not self.Ready or self.Loading or self.Ignore[idx] or queued then
 			return
+		end
+		if element and not self.Parser[element.Type] then
+			return -- labels, progress bars and the like aren't saved
 		end
 		queued = true
 		task.delay(1, function()
@@ -323,15 +342,16 @@ function SaveManager:SetAutosave(enabled)
 			if not self.Autosave or self.Library.Unloaded then
 				return
 			end
-			local name = self:GetAutoloadConfig()
-			if not name then
-				name = "Autosave"
+			-- resolved now, so a profile loaded in the meantime is the one updated
+			local name = self.ActiveProfile or self:GetAutoloadConfig()
+			local created = name == nil
+			name = name or "Autosave"
+			if self:Save(name) and created then
 				self:SetAutoloadConfig(name)
 				if self.OnAutoloadChanged then
 					self.OnAutoloadChanged(name)
 				end
 			end
-			self:Save(name)
 		end)
 	end)
 end
@@ -339,6 +359,7 @@ end
 function SaveManager:LoadAutoloadConfig()
 	local name = self:GetAutoloadConfig()
 	if not name then
+		self.Ready = true -- nothing to load: the current values are the state
 		return
 	end
 	local ok, err = self:Load(name)
@@ -451,16 +472,21 @@ function SaveManager:BuildConfigSection(tab)
 	end
 	self:SetIgnoreIndexes({ "SaveManager_ConfigName", "SaveManager_ConfigList", "SaveManager_Autosave" })
 	local savedAutosave = FileApi() and isfile(self.Folder .. "/settings/autosave.txt") and readfile(self.Folder .. "/settings/autosave.txt") == "1"
+	local built = false
 	section:AddToggle("SaveManager_Autosave", {
 		Title = "Save changes automatically",
-		Description = "Keep the autoload profile up to date as you change settings.",
+		Description = "Keep the current profile up to date as you change settings.",
 		Default = savedAutosave,
 		Callback = function(value)
 			if value ~= self.Autosave then
 				self:SetAutosave(value)
 			end
+			if built then
+				self.Ready = true -- turned on by hand: what's on screen is the state
+			end
 		end,
 	})
+	built = true
 	return section
 end
 
