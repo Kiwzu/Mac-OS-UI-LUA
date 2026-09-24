@@ -1,8 +1,9 @@
 --[[
 	MacUI · InterfaceManager
-	Builds the "Interface" settings section (theme, accent, scale, toggle key)
-	and remembers those choices between sessions. API-compatible with
-	Fluent's InterfaceManager.
+	Builds the "Interface" settings section (theme, accent, frosted glass,
+	scale, motion, shortcut list, window memory, toggle key) and remembers
+	those choices between sessions. API-compatible with Fluent's
+	InterfaceManager.
 
 	InterfaceManager:SetLibrary(MacUI)
 	InterfaceManager:SetFolder("MyHub")
@@ -19,6 +20,11 @@ local InterfaceManager = {
 		Accent = "Blue",
 		Scale = 100,
 		MenuKeybind = "RightControl",
+		Acrylic = false,
+		ReduceMotion = false,
+		ShortcutList = false,
+		RememberWindow = true,
+		Window = nil, -- last position, size, page and sidebar state
 	},
 }
 InterfaceManager.__index = InterfaceManager
@@ -81,6 +87,13 @@ function InterfaceManager:BuildInterfaceSection(tab)
 	assert(self.Library, "[InterfaceManager] call SetLibrary(MacUI) first")
 	local library = self.Library
 	local settings = self.Settings
+	-- The window's own config is the default until the user changes it here.
+	local first = library.Windows and library.Windows[1]
+	if first then
+		settings.Acrylic = first.Acrylic == true
+		settings.ShortcutList = first.KeybindListVisible == true
+	end
+	settings.ReduceMotion = library.ReduceMotion == true
 	self:LoadSettings()
 
 	-- Apply the saved values before the controls are built.
@@ -91,6 +104,14 @@ function InterfaceManager:BuildInterfaceSection(tab)
 		library:SetAccent(settings.Accent, true)
 	end
 	library:SetMinimizeKey(settings.MenuKeybind)
+	if library.SetReduceMotion then
+		library:SetReduceMotion(settings.ReduceMotion == true)
+	end
+	local function EachWindow(fn)
+		for _, window in ipairs(library.Windows or {}) do
+			fn(window)
+		end
+	end
 
 	local section = tab:AddSection({
 		Title = "Interface",
@@ -137,6 +158,33 @@ function InterfaceManager:BuildInterfaceSection(tab)
 		end
 	end)
 
+	section:AddToggle("InterfaceAcrylic", {
+		Title = "Frosted glass",
+		Description = "Blur the game behind the sidebar. Needs graphics quality 8 or higher.",
+		Default = settings.Acrylic == true,
+		Callback = function(value)
+			local applied = value
+			EachWindow(function(window)
+				if window.SetAcrylic then
+					applied = window:SetAcrylic(value) and applied
+				end
+			end)
+			if value and not applied then
+				library:Notify({
+					Title = "Frosted glass unavailable",
+					Content = "Raise your graphics quality to 8 or higher, then turn it on again.",
+					Icon = "alert-triangle",
+					IconColor = "Orange",
+					Duration = 5,
+				})
+			end
+			if settings.Acrylic ~= value then
+				settings.Acrylic = value
+				self:SaveSettings()
+			end
+		end,
+	})
+
 	local scaleReady = false
 	section:AddSlider("InterfaceScale", {
 		Title = "Interface size",
@@ -159,6 +207,68 @@ function InterfaceManager:BuildInterfaceSection(tab)
 	if settings.Scale and settings.Scale ~= 100 then
 		library:SetScale(settings.Scale / 100)
 	end
+
+	section:AddToggle("InterfaceReduceMotion", {
+		Title = "Reduce motion",
+		Description = "Turn off window, menu and switch animations.",
+		Default = settings.ReduceMotion == true,
+		Callback = function(value)
+			library:SetReduceMotion(value)
+			if settings.ReduceMotion ~= value then
+				settings.ReduceMotion = value
+				self:SaveSettings()
+			end
+		end,
+	})
+
+	section:AddToggle("InterfaceShortcutList", {
+		Title = "Shortcut list",
+		Description = "A floating panel with every keybind and shortcut.",
+		Default = settings.ShortcutList == true,
+		Callback = function(value)
+			EachWindow(function(window)
+				if window.SetKeybindList then
+					window:SetKeybindList(value)
+				end
+			end)
+			if settings.ShortcutList ~= value then
+				settings.ShortcutList = value
+				self:SaveSettings()
+			end
+		end,
+	})
+
+	section:AddToggle("InterfaceRememberWindow", {
+		Title = "Remember window",
+		Description = "Reopen at the same size, position and page.",
+		Default = settings.RememberWindow ~= false,
+		Callback = function(value)
+			if settings.RememberWindow ~= value then
+				settings.RememberWindow = value
+				if not value then
+					settings.Window = nil
+				end
+				self:SaveSettings()
+			end
+		end,
+	})
+	EachWindow(function(window)
+		if not window.StateChanged then
+			return
+		end
+		window.StateChanged:Connect(function(state)
+			if settings.RememberWindow ~= false then
+				settings.Window = state
+				self:SaveSettings()
+			end
+		end)
+		if settings.RememberWindow ~= false and type(settings.Window) == "table" then
+			-- deferred so the script can finish adding tabs first
+			task.defer(function()
+				window:ApplyState(settings.Window)
+			end)
+		end
+	end)
 
 	local keybind = section:AddKeybind("MenuKeybind", {
 		Title = "Show / hide window",

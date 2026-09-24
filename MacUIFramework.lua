@@ -7,7 +7,7 @@
 
 	MacUI — a macOS System Settings–style interface library for Roblox.
 
-	Version : 4.0.0
+	Version : 4.1.0
 	Author  : Kiwzu  (https://github.com/Kiwzu/Mac-OS-UI-LUA)
 	Icons   : Lucide (ISC license) via the asset ids published with Fluent (MIT)
 
@@ -16,13 +16,15 @@
 ]]
 
 local MacUI = {
-	Version = "4.0.0",
+	Version = "4.1.0",
 	Options = {},
 	Windows = {},
 	Unloaded = false,
 	ThemeName = "Dark",
 	Accent = Color3.fromRGB(10, 132, 255),
 	FontFamily = "rbxasset://fonts/families/BuilderSans.json",
+	MonoFamily = "rbxasset://fonts/families/RobotoMono.json",
+	ReduceMotion = false,
 }
 MacUI.Flags = MacUI.Options
 
@@ -30,6 +32,10 @@ do
 	local ok, face = pcall(Font.fromEnum, Enum.Font.BuilderSans)
 	if ok and face then
 		MacUI.FontFamily = face.Family
+	end
+	local okMono, mono = pcall(Font.fromEnum, Enum.Font.RobotoMono)
+	if okMono and mono then
+		MacUI.MonoFamily = mono.Family
 	end
 end
 
@@ -50,6 +56,7 @@ local TweenService = GetService("TweenService")
 local UserInputService = GetService("UserInputService")
 local TextService = GetService("TextService")
 local GuiService = GetService("GuiService")
+local RunService = GetService("RunService")
 local Workspace = GetService("Workspace")
 
 local LocalPlayer = Players.LocalPlayer
@@ -120,6 +127,12 @@ MacUI.Themes = {
 		Dim = rgb(0, 0, 0),
 		DimTransparency = 0.45,
 		Destructive = rgb(255, 69, 58),
+		WindowBorder = rgb(0, 0, 0),
+		WindowBorderTransparency = 0.3,
+		WindowHighlight = rgb(255, 255, 255),
+		WindowHighlightTransparency = 0.88,
+		Code = rgb(22, 22, 24),
+		GlassTransparency = 0.28,
 	},
 	Light = {
 		Background = rgb(243, 243, 246),
@@ -156,6 +169,12 @@ MacUI.Themes = {
 		Dim = rgb(0, 0, 0),
 		DimTransparency = 0.7,
 		Destructive = rgb(255, 59, 48),
+		WindowBorder = rgb(0, 0, 0),
+		WindowBorderTransparency = 0.8,
+		WindowHighlight = rgb(255, 255, 255),
+		WindowHighlightTransparency = 0.3,
+		Code = rgb(245, 245, 247),
+		GlassTransparency = 0.22,
 	},
 	Midnight = {
 		Background = rgb(0, 0, 0),
@@ -192,6 +211,12 @@ MacUI.Themes = {
 		Dim = rgb(0, 0, 0),
 		DimTransparency = 0.4,
 		Destructive = rgb(255, 69, 58),
+		WindowBorder = rgb(64, 64, 70),
+		WindowBorderTransparency = 0.1,
+		WindowHighlight = rgb(255, 255, 255),
+		WindowHighlightTransparency = 0.94,
+		Code = rgb(12, 12, 14),
+		GlassTransparency = 0.3,
 	},
 }
 MacUI.ThemeData = MacUI.Themes.Dark
@@ -323,12 +348,119 @@ end
 
 MacUI.ThemeChanged = Signal.new()
 MacUI.AccentChanged = Signal.new()
+-- Fires (idx, value, element) whenever an element with an index changes.
+MacUI.OptionChanged = Signal.new()
+-- Fires when keybinds or element shortcuts change (drives the shortcut list).
+local ShortcutsChanged = Signal.new()
 
 -- Set while a keybind is recording so the same key press doesn't also
 -- trigger other keybinds or the window's show/hide key.
 local KeyCapture = { Active = false }
 
+-- Records the next key press. `done(key)` receives a KeyCode name, "MB2"/"MB3",
+-- "None" (Backspace/Delete clears) or false (Escape or a click cancels).
+local function CaptureKey(done)
+	KeyCapture.Active = true
+	local connection
+	connection = UserInputService.InputBegan:Connect(function(input)
+		local key
+		local kind = input.UserInputType
+		if kind == Enum.UserInputType.Keyboard then
+			if input.KeyCode == Enum.KeyCode.Escape then
+				key = false
+			elseif input.KeyCode == Enum.KeyCode.Backspace or input.KeyCode == Enum.KeyCode.Delete then
+				key = "None"
+			else
+				key = input.KeyCode.Name
+			end
+		elseif kind == Enum.UserInputType.MouseButton1 or kind == Enum.UserInputType.Touch then
+			key = false -- clicking anywhere cancels, like the macOS shortcut recorder
+		elseif kind == Enum.UserInputType.MouseButton2 then
+			key = "MB2"
+		elseif kind == Enum.UserInputType.MouseButton3 then
+			key = "MB3"
+		else
+			return
+		end
+		connection:Disconnect()
+		-- keep the guard up until every other handler has seen this key press
+		task.delay(0.1, function()
+			KeyCapture.Active = false
+		end)
+		done(key)
+	end)
+	return connection
+end
+
+local function KeyMatches(input, key)
+	if not key or key == "None" then
+		return false
+	end
+	local kind = input.UserInputType
+	if kind == Enum.UserInputType.Keyboard then
+		return input.KeyCode.Name == key
+	elseif kind == Enum.UserInputType.MouseButton1 then
+		return key == "MB1"
+	elseif kind == Enum.UserInputType.MouseButton2 then
+		return key == "MB2"
+	elseif kind == Enum.UserInputType.MouseButton3 then
+		return key == "MB3"
+	end
+	return false
+end
+
+-- Mouse position in the coordinate space of our ScreenGuis (IgnoreGuiInset = false).
+local function MousePosition()
+	return UserInputService:GetMouseLocation() - GuiService:GetGuiInset()
+end
+
+local function CopyToClipboard(text)
+	local copy = setclipboard or toclipboard or set_clipboard or (Clipboard and Clipboard.set)
+	if type(copy) ~= "function" then
+		return false
+	end
+	return (pcall(copy, tostring(text)))
+end
+
+local function SameValue(a, b)
+	if type(a) == "table" and type(b) == "table" then
+		for key, value in pairs(a) do
+			if b[key] ~= value then
+				return false
+			end
+		end
+		for key, value in pairs(b) do
+			if a[key] ~= value then
+				return false
+			end
+		end
+		return true
+	end
+	return a == b
+end
+
+local function CopyValue(value)
+	if type(value) == "table" then
+		return table.clone(value)
+	end
+	return value
+end
+
+local function IsTruthy(value)
+	if type(value) == "table" then
+		return next(value) ~= nil
+	elseif type(value) == "string" then
+		return value ~= "" and value ~= "None"
+	elseif type(value) == "number" then
+		return value ~= 0
+	end
+	return value == true
+end
+
 local function Tween(object, goals, duration, style, direction)
+	if MacUI.ReduceMotion then
+		duration = 0
+	end
 	local tween = TweenService:Create(
 		object,
 		TweenInfo.new(duration or 0.25, style or Enum.EasingStyle.Quint, direction or Enum.EasingDirection.Out),
@@ -342,6 +474,8 @@ local function Round(value, decimals)
 	local factor = 10 ^ (decimals or 0)
 	return math.floor(value * factor + 0.5) / factor
 end
+
+local PushButton -- defined with the element helpers below
 
 local function IsPointer(input)
 	return input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch
@@ -392,7 +526,11 @@ local function Resolve(token)
 	elseif token == "Accent" then
 		return MacUI.Accent
 	end
-	return MacUI.ThemeData[token]
+	local value = MacUI.ThemeData[token]
+	if value == nil then
+		value = MacUI.Themes.Dark[token]
+	end
+	return value
 end
 
 -- Drops registry entries when an instance is destroyed so closed popups,
@@ -712,6 +850,20 @@ function MacUI:SetFont(family)
 	end
 end
 
+-- Registers a theme that inherits every token it doesn't define from `base` (Dark).
+function MacUI:AddTheme(name, tokens, base)
+	local theme = table.clone(self.Themes[base or "Dark"] or self.Themes.Dark)
+	for token, value in pairs(tokens or {}) do
+		theme[token] = value
+	end
+	self.Themes[name] = theme
+	return theme
+end
+
+function MacUI:SetReduceMotion(enabled)
+	self.ReduceMotion = enabled == true
+end
+
 function MacUI:SetScale(scale)
 	for _, window in ipairs(self.Windows) do
 		window:SetScale(scale)
@@ -899,11 +1051,33 @@ function MacUI:Notify(config)
 			Parent = column,
 		})
 	end
+	if type(config.Buttons) == "table" and #config.Buttons > 0 then
+		local actions = New("Frame", {
+			Name = "Actions",
+			BackgroundTransparency = 1,
+			Size = UDim2.new(1, 0, 0, 0),
+			AutomaticSize = Enum.AutomaticSize.Y,
+			LayoutOrder = 4,
+			Parent = column,
+		})
+		Padding(actions, 7, 0, 0, 0)
+		List(actions, Enum.FillDirection.Horizontal, 6)
+		for index, spec in ipairs(config.Buttons) do
+			local push = PushButton(actions, spec.Title or "OK", spec.Style or (index == 1 and "Primary" or "Default"), 24)
+			push.Instance.LayoutOrder = index
+			push.Instance.MouseButton1Click:Connect(function()
+				Spawn(spec.Callback)
+				banner:Close()
+			end)
+		end
+	end
 
+	-- Sits below the card: clicks on text fall through to it, while the
+	-- action buttons inside the card still receive their own clicks.
 	local hitbox = New("TextButton", {
 		Name = "Hitbox",
 		Size = UDim2.fromScale(1, 1),
-		ZIndex = 3,
+		ZIndex = 1,
 		Parent = holder,
 	})
 	local close = New("TextButton", {
@@ -1001,6 +1175,80 @@ end
 
 local RowMethods = {}
 RowMethods.__index = RowMethods
+
+--------------------------------------------------------------------------------
+-- Dependencies: DependsOn = "Flag" | { "Flag", value } | function() -> bool
+--------------------------------------------------------------------------------
+
+local Dependencies = {}
+local dependencyCheckQueued = false
+
+local function EvaluateDependency(dependency)
+	if dependency.Row.Destroyed then
+		return
+	end
+	local ok, result = pcall(dependency.Check)
+	local active = ok and result and true or false
+	if active == dependency.Active then
+		return
+	end
+	dependency.Active = active
+	local row = dependency.Row
+	if dependency.Mode == "Hide" then
+		row.DependencyHidden = not active
+		row:_ApplyVisibility()
+	else
+		row.DependencyDisabled = not active
+		row:_ApplyDisabled()
+	end
+end
+
+local function CheckDependencies()
+	if dependencyCheckQueued then
+		return
+	end
+	dependencyCheckQueued = true
+	task.defer(function()
+		dependencyCheckQueued = false
+		for _, dependency in ipairs(Dependencies) do
+			EvaluateDependency(dependency)
+		end
+	end)
+end
+
+local function ResolveCondition(spec)
+	if type(spec) == "function" then
+		return spec
+	end
+	local flag, expected = spec, nil
+	if type(spec) == "table" then
+		flag = spec.Flag or spec[1]
+		expected = spec.Value
+		if expected == nil then
+			expected = spec[2]
+		end
+	end
+	return function()
+		local option = MacUI.Options[flag]
+		if not option then
+			return false
+		end
+		local value = option.Value
+		if expected == nil then
+			return IsTruthy(value)
+		elseif type(value) == "table" then
+			return value[expected] == true
+		end
+		return value == expected
+	end
+end
+
+local function AddDependency(row, spec, mode)
+	table.insert(Dependencies, { Row = row, Check = ResolveCondition(spec), Mode = mode or "Disable" })
+	CheckDependencies()
+end
+
+MacUI.OptionChanged:Connect(CheckDependencies)
 
 local function CreateRow(container, info, options)
 	options = options or {}
@@ -1152,6 +1400,24 @@ local function CreateRow(container, info, options)
 		row:_UpdateReserve()
 	end)
 
+	-- Right-click (or long-press on touch) opens the row's context menu.
+	row:Connect(row.Frame.InputBegan, function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton2 then
+			row:_OpenContextMenu()
+		end
+	end)
+	row:Connect(row.Frame.TouchLongPress, function(positions, state)
+		if state == Enum.UserInputState.Begin then
+			row:_OpenContextMenu(positions and positions[1])
+		end
+	end)
+	if row.Hitbox then
+		row:_BindContext(row.Hitbox)
+	end
+	if info.Tooltip then
+		window:_AttachTooltip(row.Frame, info.Tooltip)
+	end
+
 	table.insert(group.Rows, row)
 	table.insert(tab.Rows, row)
 	row:_UpdateLayout()
@@ -1159,6 +1425,9 @@ local function CreateRow(container, info, options)
 	group:Refresh()
 	if window.SearchQuery ~= "" then
 		window:_ApplySearch()
+	end
+	if info.DependsOn ~= nil then
+		AddDependency(row, info.DependsOn, info.DependsMode)
 	end
 	return row
 end
@@ -1174,9 +1443,10 @@ end
 function RowMethods:_UpdateLayout()
 	local hasTitle = self.Title ~= ""
 	local hasDesc = self.Description ~= ""
+	self.Content.Size = UDim2.new(1, 0, 0, self.MinHeight or 44)
 	self.TitleLabel.Visible = hasTitle
 	self.DescLabel.Visible = hasDesc
-	self.Stack.Visible = hasTitle or hasDesc
+	self.Stack.Visible = hasTitle or hasDesc or self.ForceStack == true
 	local pad = (hasTitle and hasDesc) and 9 or 13
 	if self.TallPadding then
 		pad = math.max(pad, self.TallPadding)
@@ -1202,8 +1472,13 @@ function RowMethods:_Matches(query)
 	return haystack:find(query, 1, true) ~= nil
 end
 
+-- Shown unless the script hid it or a DependsOn condition is unmet (search aside).
+function RowMethods:_IsShown()
+	return self.UserVisible and not self.DependencyHidden
+end
+
 function RowMethods:_ApplyVisibility()
-	self.Frame.Visible = self.UserVisible and self.SearchMatch
+	self.Frame.Visible = self:_IsShown() and self.SearchMatch
 	self.Group:Refresh()
 end
 
@@ -1213,7 +1488,12 @@ function RowMethods:SetVisible(visible)
 end
 
 function RowMethods:SetDisabled(disabled)
-	self.Disabled = disabled == true
+	self.UserDisabled = disabled == true
+	self:_ApplyDisabled()
+end
+
+function RowMethods:_ApplyDisabled()
+	self.Disabled = self.UserDisabled == true or self.DependencyDisabled == true
 	if self.Disabled and not self.Blocker then
 		self.Blocker = New("TextButton", {
 			Name = "Disabled",
@@ -1235,6 +1515,12 @@ function RowMethods:SetDisabled(disabled)
 end
 
 function RowMethods:Destroy()
+	self.Destroyed = true
+	for index = #Dependencies, 1, -1 do
+		if Dependencies[index].Row == self then
+			table.remove(Dependencies, index)
+		end
+	end
 	for _, connection in ipairs(self.Connections) do
 		connection:Disconnect()
 	end
@@ -1257,6 +1543,178 @@ function RowMethods:Connect(signal, fn)
 	return connection
 end
 
+-- Briefly pulses the row in the accent colour (used by search and Spotlight).
+function RowMethods:Flash()
+	local flash = self.FlashFrame
+	if not flash then
+		flash = New("Frame", {
+			Name = "Flash",
+			Position = UDim2.fromOffset(4, 4),
+			Size = UDim2.new(1, -8, 1, -8),
+			BackgroundTransparency = 1,
+			ZIndex = 1,
+			Theme = { BackgroundColor3 = "Accent" },
+			Parent = self.Frame,
+		})
+		Corner(flash, 7)
+		self.FlashFrame = flash
+	end
+	task.spawn(function()
+		for _ = 1, 2 do
+			Tween(flash, { BackgroundTransparency = 0.7 }, 0.18, Enum.EasingStyle.Sine)
+			task.wait(0.22)
+			Tween(flash, { BackgroundTransparency = 1 }, 0.4, Enum.EasingStyle.Sine)
+			task.wait(0.32)
+		end
+	end)
+end
+
+function RowMethods:_BindContext(button)
+	self:Connect(button.MouseButton2Click, function()
+		self:_OpenContextMenu()
+	end)
+end
+
+function RowMethods:_ContextItems()
+	local element = self.Element
+	local items = {}
+	if not element then
+		return items
+	end
+	local window = self.Window
+	if element.Default ~= nil or element._Reset then
+		table.insert(items, {
+			Text = "Reset to Default",
+			Icon = "rotate-ccw",
+			Disabled = self.Disabled or element:IsDefault(),
+			Callback = function()
+				element:Reset()
+				window:Toast(element.Title or "Setting", { Detail = "Reset", Icon = "rotate-ccw" })
+			end,
+		})
+	end
+	local text = element:GetText()
+	if text and text ~= "" then
+		local copyTitle = "Copy Value"
+		if element.Type == "Label" or element.Type == "Paragraph" or element.Type == "Code" then
+			copyTitle = "Copy Text"
+		end
+		table.insert(items, {
+			Text = copyTitle,
+			Icon = "copy",
+			Callback = function()
+				if CopyToClipboard(text) then
+					window:Toast("Copied to Clipboard", { Icon = "clipboard" })
+				else
+					window:Toast("Clipboard isn’t available", { Icon = "x-circle" })
+				end
+			end,
+		})
+	end
+	if element.Type == "Dropdown" and element.Multi and not self.Disabled then
+		table.insert(items, "-")
+		table.insert(items, {
+			Text = "Select All",
+			Icon = "list-checks",
+			Callback = function()
+				element:SetValue(element.Values)
+			end,
+		})
+		table.insert(items, {
+			Text = "Deselect All",
+			Icon = "list",
+			Callback = function()
+				element:SetValue({})
+			end,
+		})
+	end
+	if element._Activate then
+		table.insert(items, "-")
+		table.insert(items, {
+			Text = element.Shortcut and "Change Shortcut…" or "Add Shortcut…",
+			Icon = "keyboard",
+			Shortcut = element.Shortcut and KeyName(element.Shortcut) or nil,
+			Callback = function()
+				element:RecordShortcut()
+			end,
+		})
+		if element.Shortcut then
+			table.insert(items, {
+				Text = "Remove Shortcut",
+				Icon = "x",
+				Callback = function()
+					element:SetShortcut(nil)
+				end,
+			})
+		end
+	end
+	while items[1] == "-" do
+		table.remove(items, 1)
+	end
+	while items[#items] == "-" do
+		table.remove(items)
+	end
+	return items
+end
+
+function RowMethods:_OpenContextMenu(point)
+	local now = os.clock()
+	if now - (self.LastContext or 0) < 0.2 then
+		return
+	end
+	self.LastContext = now
+	local items = self:_ContextItems()
+	if #items > 0 then
+		self.Window:_OpenContextMenu(point or MousePosition(), items)
+	end
+end
+
+-- The little key cap that shows an element's keyboard shortcut.
+function RowMethods:_RenderShortcut()
+	local element = self.Element
+	local key = element and element.Shortcut
+	local show = key ~= nil or self.RecordingShortcut == true
+	if show and not self.ShortcutCap then
+		local cap = New("TextButton", {
+			Name = "Shortcut",
+			TextSize = 11,
+			Weight = Enum.FontWeight.Medium,
+			Size = UDim2.fromOffset(0, 20),
+			AutomaticSize = Enum.AutomaticSize.X,
+			LayoutOrder = -10,
+			Theme = {
+				BackgroundColor3 = function(t)
+					return self.RecordingShortcut and t.Field or t.Control
+				end,
+				BackgroundTransparency = function()
+					return 0
+				end,
+				TextColor3 = "SubText",
+			},
+			Parent = self.Accessory,
+		})
+		Corner(cap, 5)
+		Padding(cap, 0, 7, 0, 7)
+		self.ShortcutStroke = Stroke(cap, function(t)
+			return self.RecordingShortcut and MacUI.Accent or t.ControlStroke
+		end)
+		New("UISizeConstraint", { MinSize = Vector2.new(24, 20), Parent = cap })
+		cap.MouseButton1Click:Connect(function()
+			if self.Element and not self.Disabled then
+				self.Element:RecordShortcut()
+			end
+		end)
+		self:_BindContext(cap)
+		self.ShortcutCap = cap
+	end
+	if self.ShortcutCap then
+		self.ShortcutCap.Visible = show
+		self.ShortcutCap.Text = self.RecordingShortcut and "Type a key…" or KeyName(key or "")
+		Restyle(self.ShortcutCap, 0.12)
+		Restyle(self.ShortcutStroke, 0.12)
+	end
+end
+
 --------------------------------------------------------------------------------
 -- Element base
 --------------------------------------------------------------------------------
@@ -1265,7 +1723,7 @@ local ElementBase = {}
 ElementBase.__index = ElementBase
 
 local function NewElement(kind, row, info)
-	return setmetatable({
+	local element = setmetatable({
 		Type = kind,
 		Row = row,
 		Title = info.Title,
@@ -1273,6 +1731,8 @@ local function NewElement(kind, row, info)
 		Callback = info.Callback,
 		_listeners = {},
 	}, ElementBase)
+	row.Element = element
+	return element
 end
 
 function ElementBase:SetTitle(text)
@@ -1314,6 +1774,83 @@ function ElementBase:_Emit(...)
 	for _, fn in ipairs(self._listeners) do
 		Spawn(fn, ...)
 	end
+	if self.Idx ~= nil then
+		MacUI.OptionChanged:Fire(self.Idx, self.Value, self)
+	end
+end
+
+function ElementBase:IsDefault()
+	if self._IsDefault then
+		return self:_IsDefault()
+	end
+	return self.Default == nil or SameValue(self.Value, self.Default)
+end
+
+function ElementBase:Reset()
+	if self._Reset then
+		self:_Reset()
+	elseif self.Default ~= nil and self.SetValue then
+		self:SetValue(CopyValue(self.Default))
+	end
+end
+
+-- Human-readable value, used by "Copy Value" and Spotlight.
+function ElementBase:GetText()
+	if self._Text then
+		return self:_Text()
+	end
+	if self.Value == nil then
+		return nil
+	end
+	return tostring(self.Value)
+end
+
+-- Binds a key that activates this element (toggles and buttons).
+function ElementBase:SetShortcut(key)
+	if typeof(key) == "EnumItem" then
+		key = key.Name
+	end
+	if key == "None" or key == "" or key == false then
+		key = nil
+	end
+	self.Shortcut = key
+	local row = self.Row
+	if row.ShortcutConnection then
+		row.ShortcutConnection:Disconnect()
+		row.ShortcutConnection = nil
+	end
+	if key then
+		row.ShortcutConnection = row:Connect(UserInputService.InputBegan, function(input)
+			if KeyCapture.Active or row.Disabled or row.DependencyHidden or UserInputService:GetFocusedTextBox() then
+				return
+			end
+			if KeyMatches(input, key) and self._Activate then
+				self:_Activate(true)
+			end
+		end)
+	end
+	row:_RenderShortcut()
+	ShortcutsChanged:Fire()
+	if self.Idx ~= nil then
+		MacUI.OptionChanged:Fire(self.Idx, self.Value, self)
+	end
+end
+
+function ElementBase:RecordShortcut()
+	local row = self.Row
+	if row.RecordingShortcut or not self._Activate then
+		return
+	end
+	row.RecordingShortcut = true
+	row:_RenderShortcut()
+	CaptureKey(function(key)
+		row.RecordingShortcut = false
+		if key == false then
+			row:_RenderShortcut()
+			return
+		end
+		self:SetShortcut(key)
+	end)
 end
 
 function ElementBase:Destroy()
@@ -1327,12 +1864,13 @@ local function Register(idx, element)
 	if idx ~= nil then
 		element.Idx = idx
 		MacUI.Options[idx] = element
+		CheckDependencies()
 	end
 	return element
 end
 
--- Push button used in rows and dialogs.
-local function PushButton(parent, text, style, height)
+-- Push button used in rows, dialogs and notifications.
+function PushButton(parent, text, style, height)
 	local button = { Hovered = false, Pressed = false, Style = style or "Default" }
 	button.Instance = New("TextButton", {
 		Name = "PushButton",
@@ -1372,6 +1910,11 @@ local function PushButton(parent, text, style, height)
 	})
 	Corner(button.Instance, 6)
 	Padding(button.Instance, 0, 12, 0, 12)
+	New("UIGradient", {
+		Rotation = 90,
+		Color = ColorSequence.new(Color3.new(1, 1, 1), Color3.fromRGB(234, 234, 234)),
+		Parent = button.Instance,
+	})
 	button.Stroke = Stroke(button.Instance, function(t)
 		return button.Style == "Default" and t.ControlStroke or Darken(MacUI.Accent, 0.2)
 	end, 1, 0.35)
@@ -1412,6 +1955,9 @@ function Container:AddParagraph(idx, info)
 		Title = info.Title,
 		Description = info.Content or info.Description,
 		Keywords = info.Keywords,
+		Tooltip = info.Tooltip,
+		DependsOn = info.DependsOn,
+		DependsMode = info.DependsMode,
 	}, { TitleWeight = Enum.FontWeight.Medium, DescSize = 13, DescToken = "SubText" })
 	row.FullWidthText = true
 	row:_UpdateReserve()
@@ -1420,6 +1966,9 @@ function Container:AddParagraph(idx, info)
 	function Paragraph:SetContent(text)
 		self.Content = text
 		row:SetDesc(text)
+	end
+	function Paragraph:_Text()
+		return self.Content and tostring(self.Content) or row.Title
 	end
 	Paragraph.SetDesc = Paragraph.SetContent
 	Paragraph.SetValue = Paragraph.SetContent
@@ -1474,10 +2023,14 @@ end
 Container.AddStatus = Container.AddLabel
 
 function Container:AddButton(info, callback)
-	if type(info) == "string" then
+	local idx
+	if type(info) == "string" and type(callback) == "table" then
+		idx, info = info, callback
+	elseif type(info) == "string" then
 		info = { Title = info, Callback = callback }
 	end
 	info = info or {}
+	idx = idx or info.Flag
 	local row = CreateRow(self, info, { Clickable = true })
 	local Button = NewElement("Button", row, info)
 
@@ -1486,6 +2039,16 @@ function Container:AddButton(info, callback)
 			return
 		end
 		Spawn(Button.Callback)
+	end
+
+	function Button:_Activate(announce)
+		if row.Disabled then
+			return
+		end
+		Fire()
+		if announce then
+			row.Window:Toast(self.Title or "Button", { Icon = "play" })
+		end
 	end
 
 	if info.ButtonText then
@@ -1508,6 +2071,12 @@ function Container:AddButton(info, callback)
 	end
 	function Button:Fire()
 		Fire()
+	end
+	if info.Shortcut then
+		Button:SetShortcut(info.Shortcut)
+	end
+	if idx ~= nil then
+		Register(idx, Button)
 	end
 	return Button
 end
@@ -1598,6 +2167,25 @@ function Container:AddToggle(idx, info)
 		self.Value = value
 		Render(0.25)
 		self:_Emit(value)
+		ShortcutsChanged:Fire()
+	end
+
+	function Toggle:_Text()
+		return self.Value and "On" or "Off"
+	end
+
+	function Toggle:_Activate(announce)
+		if row.Disabled then
+			return
+		end
+		self:SetValue(not self.Value)
+		if announce then
+			row.Window:Toast(self.Title or "Toggle", {
+				Detail = self.Value and "On" or "Off",
+				Icon = self.Value and "check-circle" or "circle",
+				Highlight = self.Value,
+			})
+		end
 	end
 
 	row.OnClick = function()
@@ -1619,8 +2207,12 @@ function Container:AddToggle(idx, info)
 		end)
 	end
 
+	Toggle.Default = Toggle.Value
 	Render(0)
 	Register(idx, Toggle)
+	if info.Shortcut then
+		Toggle:SetShortcut(info.Shortcut)
+	end
 	Toggle:_Emit(Toggle.Value)
 	return Toggle
 end
@@ -1713,7 +2305,7 @@ function Container:AddSlider(idx, info)
 	end
 	box.AutomaticSize = Enum.AutomaticSize.None
 	box.Size = UDim2.fromOffset(
-		math.max(46, math.ceil(math.max(MeasureText(Format(Slider.Max), 13), MeasureText(Format(Slider.Min), 13))) + 16),
+		math.max(56, math.ceil(math.max(MeasureText(Format(Slider.Max), 13), MeasureText(Format(Slider.Min), 13))) + 16),
 		24
 	)
 
@@ -1815,6 +2407,11 @@ function Container:AddSlider(idx, info)
 	end)
 
 	Slider.Value = Normalize(Slider.Value)
+	Slider.Default = Slider.Value
+	function Slider:_Text()
+		return Format(self.Value)
+	end
+	row:_BindContext(hit)
 	Render(0)
 	Register(idx, Slider)
 	Slider:_Emit(Slider.Value)
@@ -1827,9 +2424,34 @@ function Container:AddDropdown(idx, info)
 	local row = CreateRow(self, info, { Clickable = true })
 	local window = row.Window
 	local Dropdown = NewElement("Dropdown", row, info)
-	Dropdown.Values = info.Values or {}
+	local special = info.SpecialType
+	if info.Values == "Players" then
+		special = "Player"
+	elseif info.Values == "Teams" then
+		special = "Team"
+	end
+	local function SpecialValues()
+		local list = {}
+		if special == "Player" then
+			for _, player in ipairs(Players:GetPlayers()) do
+				if player ~= LocalPlayer or info.ExcludeLocal == false then
+					table.insert(list, player.Name)
+				end
+			end
+		elseif special == "Team" then
+			local ok, teams = pcall(function()
+				return GetService("Teams"):GetTeams()
+			end)
+			for _, team in ipairs(ok and teams or {}) do
+				table.insert(list, team.Name)
+			end
+		end
+		table.sort(list)
+		return list
+	end
+	Dropdown.Values = special and SpecialValues() or (type(info.Values) == "table" and info.Values or {})
 	Dropdown.Multi = info.Multi == true
-	Dropdown.AllowNull = info.AllowNull == true or Dropdown.Multi
+	Dropdown.AllowNull = info.AllowNull == true or Dropdown.Multi or special ~= nil
 
 	if Dropdown.Multi then
 		Dropdown.Value = {}
@@ -1970,16 +2592,23 @@ function Container:AddDropdown(idx, info)
 
 	function Dropdown:SetValues(values)
 		self.Values = values or {}
+		-- a selection that no longer exists is dropped, and that is a change
+		local changed = false
 		if self.Multi then
 			for key in pairs(self.Value) do
 				if not table.find(self.Values, key) then
 					self.Value[key] = nil
+					changed = true
 				end
 			end
 		elseif self.Value ~= nil and not table.find(self.Values, self.Value) then
 			self.Value = (not self.AllowNull) and self.Values[1] or nil
+			changed = true
 		end
 		self:Display()
+		if changed then
+			self:_Emit(self.Value)
+		end
 	end
 
 	function Dropdown:Open()
@@ -2018,6 +2647,48 @@ function Container:AddDropdown(idx, info)
 		window:_ClosePopup()
 	end
 
+	function Dropdown:_Text()
+		if self.Multi then
+			local list = {}
+			for _, value in ipairs(self:GetActiveValues()) do
+				table.insert(list, tostring(value))
+			end
+			return #list > 0 and table.concat(list, ", ") or nil
+		end
+		return self.Value ~= nil and tostring(self.Value) or nil
+	end
+
+	if special then
+		local function Refresh()
+			if not row.Destroyed then
+				Dropdown:SetValues(SpecialValues())
+			end
+		end
+		if special == "Player" then
+			row:Connect(Players.PlayerAdded, Refresh)
+			-- the leaving player is still in GetPlayers() while this fires
+			row:Connect(Players.PlayerRemoving, function(leaving)
+				if row.Destroyed then
+					return
+				end
+				local list = SpecialValues()
+				local index = table.find(list, leaving.Name)
+				if index then
+					table.remove(list, index)
+				end
+				Dropdown:SetValues(list)
+			end)
+		else
+			local ok, teams = pcall(GetService, "Teams")
+			if ok and teams then
+				row:Connect(teams.ChildAdded, Refresh)
+				row:Connect(teams.ChildRemoved, function()
+					task.defer(Refresh)
+				end)
+			end
+		end
+	end
+
 	popup.MouseEnter:Connect(function()
 		capsuleState.Hovered = true
 		Restyle(capsule, 0.12)
@@ -2033,6 +2704,8 @@ function Container:AddDropdown(idx, info)
 		Dropdown:Open()
 	end
 
+	Dropdown.Default = CopyValue(Dropdown.Value)
+	row:_BindContext(popup)
 	Dropdown:Display()
 	return Register(idx, Dropdown)
 end
@@ -2108,6 +2781,7 @@ function Container:AddInput(idx, info)
 			Input:SetValue(box.Text)
 		end
 	end)
+	Input.Default = Input.Value
 	return Register(idx, Input)
 end
 Container.AddTextbox = Container.AddInput
@@ -2155,19 +2829,7 @@ function Container:AddKeybind(idx, info)
 	end
 
 	local function Matches(input)
-		if Keybind.Value == "None" then
-			return false
-		end
-		if input.UserInputType == Enum.UserInputType.Keyboard then
-			return input.KeyCode.Name == Keybind.Value
-		elseif input.UserInputType == Enum.UserInputType.MouseButton1 then
-			return Keybind.Value == "MB1"
-		elseif input.UserInputType == Enum.UserInputType.MouseButton2 then
-			return Keybind.Value == "MB2"
-		elseif input.UserInputType == Enum.UserInputType.MouseButton3 then
-			return Keybind.Value == "MB3"
-		end
-		return false
+		return KeyMatches(input, Keybind.Value)
 	end
 
 	function Keybind:GetState()
@@ -2203,6 +2865,10 @@ function Container:AddKeybind(idx, info)
 		for _, fn in ipairs(self._listeners) do
 			Spawn(fn, self.Value)
 		end
+		ShortcutsChanged:Fire()
+		if self.Idx ~= nil then
+			MacUI.OptionChanged:Fire(self.Idx, self.Value, self)
+		end
 	end
 
 	function Keybind:OnClick(fn)
@@ -2212,6 +2878,18 @@ function Container:AddKeybind(idx, info)
 	function Keybind:DoClick()
 		Spawn(self.Callback, self.Toggled)
 		clicked:Fire(self.Toggled)
+		ShortcutsChanged:Fire()
+	end
+
+	Keybind.DefaultKey, Keybind.DefaultMode = Keybind.Value, Keybind.Mode
+	function Keybind:_IsDefault()
+		return self.Value == self.DefaultKey and self.Mode == self.DefaultMode
+	end
+	function Keybind:_Reset()
+		self:SetValue(self.DefaultKey, self.DefaultMode)
+	end
+	function Keybind:_Text()
+		return self.Value ~= "None" and KeyName(self.Value) or nil
 	end
 
 	cap.MouseEnter:Connect(function()
@@ -2227,48 +2905,21 @@ function Container:AddKeybind(idx, info)
 			return
 		end
 		Keybind.Picking = true
-		KeyCapture.Active = true
 		Render()
-		local connection
-		connection = UserInputService.InputBegan:Connect(function(input)
-			local key
-			if input.UserInputType == Enum.UserInputType.Keyboard then
-				if input.KeyCode == Enum.KeyCode.Escape then
-					key = Keybind.Value
-				elseif input.KeyCode == Enum.KeyCode.Backspace or input.KeyCode == Enum.KeyCode.Delete then
-					key = "None"
-				else
-					key = input.KeyCode.Name
-				end
-			elseif input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-				-- clicking anywhere cancels, like the macOS shortcut recorder
-				key = Keybind.Value
-			elseif input.UserInputType == Enum.UserInputType.MouseButton2 then
-				key = "MB2"
-			elseif input.UserInputType == Enum.UserInputType.MouseButton3 then
-				key = "MB3"
-			else
+		local connection = CaptureKey(function(key)
+			Keybind.Picking = false
+			if key == false or key == Keybind.Value then
+				Render()
 				return
 			end
-			connection:Disconnect()
-			Keybind.Picking = false
-			-- keep the guard up until every other handler has seen this key press
-			task.delay(0.1, function()
-				KeyCapture.Active = false
-			end)
-			local before = Keybind.Value
-			Keybind.Value = key
-			Render()
-			if before ~= key then
-				Keybind:SetValue(key)
-			end
+			Keybind:SetValue(key)
 		end)
 		table.insert(row.Connections, connection)
 	end)
 
 	local holding = false
 	row:Connect(UserInputService.InputBegan, function(input)
-		if Keybind.Picking or KeyCapture.Active or row.Disabled or UserInputService:GetFocusedTextBox() then
+		if Keybind.Picking or KeyCapture.Active or row.Disabled or row.DependencyHidden or UserInputService:GetFocusedTextBox() then
 			return
 		end
 		if Matches(input) then
@@ -2287,9 +2938,11 @@ function Container:AddKeybind(idx, info)
 			Keybind.Toggled = false
 			Spawn(Keybind.Callback, false)
 			clicked:Fire(false)
+			ShortcutsChanged:Fire()
 		end
 	end)
 
+	row:_BindContext(cap)
 	Render()
 	return Register(idx, Keybind)
 end
@@ -2620,6 +3273,18 @@ function Container:AddColorpicker(idx, info)
 	end)
 	well.MouseButton1Click:Connect(OpenPicker)
 	row.OnClick = OpenPicker
+	row:_BindContext(well)
+
+	Picker.DefaultColor, Picker.DefaultTransparency = Picker.Value, Picker.Transparency
+	function Picker:_IsDefault()
+		return self.Value:ToHex() == self.DefaultColor:ToHex() and self.Transparency == self.DefaultTransparency
+	end
+	function Picker:_Reset()
+		self:SetValueRGB(self.DefaultColor, self.DefaultTransparency)
+	end
+	function Picker:_Text()
+		return "#" .. self.Value:ToHex():upper()
+	end
 
 	Picker:Display()
 	return Register(idx, Picker)
@@ -2741,6 +3406,7 @@ function Container:AddSegmented(idx, info)
 		Build()
 	end
 
+	Segmented.Default = Segmented.Value
 	Build()
 	return Register(idx, Segmented)
 end
@@ -2786,10 +3452,440 @@ function Container:AddProgress(idx, info)
 		self:_Emit(self.Value)
 	end
 
+	function Progress:_Text()
+		return label.Text
+	end
+
 	Progress:SetValue(Progress.Value)
 	return Register(idx, Progress)
 end
 Container.AddProgressBar = Container.AddProgress
+
+-- Numeric stepper: [ 12 ] [ − | + ]  (hold a button to repeat)
+function Container:AddStepper(idx, info)
+	idx, info = ParseArgs(idx, info)
+	local row = CreateRow(self, info)
+	local Stepper = NewElement("Stepper", row, info)
+	Stepper.Min = tonumber(info.Min) or 0
+	Stepper.Max = tonumber(info.Max) or 100
+	Stepper.Step = tonumber(info.Step or info.Increment) or 1
+	local fraction = tostring(Stepper.Step):match("%.(%d+)$")
+	Stepper.Rounding = tonumber(info.Rounding) or (fraction and #fraction or 0)
+	Stepper.Suffix = info.Suffix or ""
+
+	local function Normalize(value)
+		return math.clamp(Round(tonumber(value) or Stepper.Min, Stepper.Rounding), Stepper.Min, Stepper.Max)
+	end
+	local function Format(value)
+		return string.format("%." .. math.max(Stepper.Rounding, 0) .. "f", value) .. Stepper.Suffix
+	end
+	Stepper.Value = Normalize(info.Default or Stepper.Min)
+
+	local box = New("TextBox", {
+		Name = "Value",
+		TextSize = 13,
+		Size = UDim2.fromOffset(
+			math.max(40, math.ceil(math.max(MeasureText(Format(Stepper.Max), 13), MeasureText(Format(Stepper.Min), 13))) + 16),
+			24
+		),
+		TextXAlignment = Enum.TextXAlignment.Center,
+		BackgroundTransparency = 0,
+		LayoutOrder = 1,
+		Theme = { BackgroundColor3 = "Field", TextColor3 = "Text" },
+		Parent = row.Accessory,
+	})
+	Corner(box, 6)
+	local boxStroke = Stroke(box, "FieldStroke")
+
+	local pill = New("Frame", {
+		Name = "Stepper",
+		Size = UDim2.fromOffset(62, 24),
+		LayoutOrder = 2,
+		Theme = { BackgroundColor3 = "Button" },
+		Parent = row.Accessory,
+	})
+	Corner(pill, 6)
+	Stroke(pill, "ControlStroke", 1, 0.35)
+	New("Frame", {
+		Name = "Divider",
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.new(0, 1, 1, -10),
+		ZIndex = 3,
+		Theme = { BackgroundColor3 = "ControlStroke" },
+		Parent = pill,
+	})
+
+	local halves = {}
+	local function Half(direction)
+		local state = { Hovered = false, Enabled = true }
+		local button = New("TextButton", {
+			Name = direction < 0 and "Decrement" or "Increment",
+			Position = UDim2.fromScale(direction < 0 and 0 or 0.5, 0),
+			Size = UDim2.fromScale(0.5, 1),
+			Theme = {
+				BackgroundColor3 = "Hover",
+				BackgroundTransparency = function(t)
+					return (state.Hovered and state.Enabled) and t.HoverTransparency - 0.03 or 1
+				end,
+			},
+			Parent = pill,
+		})
+		Corner(button, 6)
+		local glyph = IconImage({
+			Icon = direction < 0 and "minus" or "plus",
+			IconSize = 12,
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.fromScale(0.5, 0.5),
+			ZIndex = 2,
+			Theme = {
+				ImageColor3 = function(t)
+					return state.Enabled and t.Text or t.Tertiary
+				end,
+			},
+			Parent = button,
+		})
+		local holdToken = 0
+		button.MouseEnter:Connect(function()
+			state.Hovered = true
+			Restyle(button, 0.1)
+		end)
+		button.MouseLeave:Connect(function()
+			state.Hovered = false
+			holdToken += 1
+			Restyle(button, 0.15)
+		end)
+		button.MouseButton1Down:Connect(function()
+			if row.Disabled then
+				return
+			end
+			holdToken += 1
+			local token = holdToken
+			Stepper:SetValue(Stepper.Value + direction * Stepper.Step)
+			task.delay(0.4, function()
+				while token == holdToken and button.Parent do
+					Stepper:SetValue(Stepper.Value + direction * Stepper.Step)
+					task.wait(0.07)
+				end
+			end)
+		end)
+		button.MouseButton1Up:Connect(function()
+			holdToken += 1
+		end)
+		row:_BindContext(button)
+		halves[direction] = {
+			State = state,
+			Button = button,
+			Glyph = glyph,
+			StopHold = function()
+				holdToken += 1
+			end,
+		}
+	end
+	Half(-1)
+	Half(1)
+	row:Connect(UserInputService.InputEnded, function(input)
+		if IsPointer(input) then
+			halves[-1].StopHold()
+			halves[1].StopHold()
+		end
+	end)
+
+	local function Render()
+		if not box:IsFocused() then
+			box.Text = Format(Stepper.Value)
+		end
+		for direction, half in pairs(halves) do
+			half.State.Enabled = direction < 0 and Stepper.Value > Stepper.Min or direction > 0 and Stepper.Value < Stepper.Max
+			Restyle(half.Button, 0.12)
+			Restyle(half.Glyph, 0.12)
+		end
+	end
+
+	function Stepper:SetValue(value)
+		value = Normalize(value)
+		local changed = value ~= self.Value
+		self.Value = value
+		Render()
+		if changed then
+			self:_Emit(value)
+		end
+	end
+
+	function Stepper:_Text()
+		return Format(self.Value)
+	end
+
+	box.Focused:Connect(function()
+		box.Text = string.format("%." .. math.max(Stepper.Rounding, 0) .. "f", Stepper.Value)
+		Themed(boxStroke, { Color = "Accent" })
+	end)
+	box.FocusLost:Connect(function()
+		Themed(boxStroke, { Color = "FieldStroke" })
+		local number = tonumber((box.Text:gsub("[^%d%.%-]", "")))
+		if number then
+			Stepper:SetValue(number)
+		end
+		box.Text = Format(Stepper.Value)
+	end)
+
+	Stepper.Default = Stepper.Value
+	Render()
+	Register(idx, Stepper)
+	Stepper:_Emit(Stepper.Value)
+	return Stepper
+end
+
+-- Radio group: the options stack on the right side of the row.
+function Container:AddRadio(idx, info)
+	idx, info = ParseArgs(idx, info)
+	local row = CreateRow(self, info)
+	local Radio = NewElement("Radio", row, info)
+	Radio.Values = info.Values or {}
+	local default = info.Default
+	if type(default) == "number" then
+		default = Radio.Values[default]
+	end
+	Radio.Value = default or Radio.Values[1]
+
+	local list = New("Frame", {
+		Name = "Radio",
+		BackgroundTransparency = 1,
+		Size = UDim2.fromOffset(0, 0),
+		AutomaticSize = Enum.AutomaticSize.XY,
+		Parent = row.Accessory,
+	})
+	List(list, nil, 6)
+	local options = {}
+
+	local function Paint(duration)
+		for value, option in pairs(options) do
+			option.Selected = Radio.Value == value
+			Restyle(option.Circle, duration)
+			Restyle(option.Stroke, duration)
+			Tween(option.Dot, { Size = option.Selected and UDim2.fromOffset(6, 6) or UDim2.fromOffset(0, 0) }, duration or 0.2, Enum.EasingStyle.Back)
+		end
+	end
+
+	local function Build()
+		for _, option in pairs(options) do
+			option.Button:Destroy()
+		end
+		table.clear(options)
+		for index, value in ipairs(Radio.Values) do
+			local option = { Selected = false }
+			option.Button = New("TextButton", {
+				Name = tostring(value),
+				Size = UDim2.fromOffset(0, 20),
+				AutomaticSize = Enum.AutomaticSize.X,
+				LayoutOrder = index,
+				Parent = list,
+			})
+			option.Circle = New("Frame", {
+				Name = "Circle",
+				AnchorPoint = Vector2.new(0, 0.5),
+				Position = UDim2.fromScale(0, 0.5),
+				Size = UDim2.fromOffset(16, 16),
+				Theme = {
+					BackgroundColor3 = function(t)
+						return option.Selected and MacUI.Accent or t.Field
+					end,
+				},
+				Parent = option.Button,
+			})
+			Corner(option.Circle, 8)
+			option.Stroke = Stroke(option.Circle, function(t)
+				return option.Selected and Darken(MacUI.Accent, 0.15) or t.FieldStroke
+			end)
+			option.Dot = New("Frame", {
+				Name = "Dot",
+				AnchorPoint = Vector2.new(0.5, 0.5),
+				Position = UDim2.fromScale(0.5, 0.5),
+				Size = UDim2.fromOffset(0, 0),
+				BackgroundColor3 = Color3.new(1, 1, 1),
+				Parent = option.Circle,
+			})
+			Corner(option.Dot, 3)
+			New("TextLabel", {
+				Name = "Label",
+				Text = tostring(value),
+				TextSize = 13,
+				Position = UDim2.fromOffset(24, 0),
+				Size = UDim2.fromOffset(0, 20),
+				AutomaticSize = Enum.AutomaticSize.X,
+				Theme = { TextColor3 = "Text" },
+				Parent = option.Button,
+			})
+			option.Button.MouseButton1Click:Connect(function()
+				if not row.Disabled then
+					Radio:SetValue(value)
+				end
+			end)
+			row:_BindContext(option.Button)
+			options[value] = option
+		end
+		local count = #Radio.Values
+		row.MinHeight = math.max(44, count * 20 + math.max(count - 1, 0) * 6 + 22)
+		row:_UpdateLayout()
+		Paint(0)
+	end
+
+	function Radio:SetValue(value)
+		if not table.find(self.Values, value) then
+			return
+		end
+		self.Value = value
+		Paint(0.2)
+		self:_Emit(value)
+	end
+
+	function Radio:SetValues(values)
+		self.Values = values or {}
+		if not table.find(self.Values, self.Value) then
+			self.Value = self.Values[1]
+		end
+		Build()
+	end
+
+	Radio.Default = Radio.Value
+	Build()
+	return Register(idx, Radio)
+end
+Container.AddRadioGroup = Container.AddRadio
+
+-- Monospace block with a copy button, for keys, links and snippets.
+function Container:AddCode(idx, info)
+	idx, info = ParseArgs(idx, info)
+	local row = CreateRow(self, {
+		Title = info.Title,
+		Description = info.Description,
+		Keywords = info.Keywords,
+		Tooltip = info.Tooltip,
+		DependsOn = info.DependsOn,
+		DependsMode = info.DependsMode,
+	}, { TitleWeight = Enum.FontWeight.Medium })
+	row.FullWidthText = true
+	row.ForceStack = true
+	row:_UpdateLayout()
+	row:_UpdateReserve()
+	local Code = NewElement("Code", row, info)
+	Code.Value = tostring(info.Code or info.Content or "")
+
+	New("Frame", { Name = "Gap", BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 4), LayoutOrder = 3, Parent = row.Stack })
+	local frame = New("Frame", {
+		Name = "Code",
+		Size = UDim2.new(1, 0, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		LayoutOrder = 4,
+		Theme = { BackgroundColor3 = "Code" },
+		Parent = row.Stack,
+	})
+	Corner(frame, 8)
+	Stroke(frame, "FieldStroke")
+	Padding(frame, 10, 40, 10, 12)
+	local source = New("TextLabel", {
+		Name = "Source",
+		Text = Code.Value,
+		TextSize = 12,
+		FontFace = Font.new(MacUI.MonoFamily),
+		Size = UDim2.new(1, 0, 0, 0),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		TextWrapped = true,
+		TextYAlignment = Enum.TextYAlignment.Top,
+		Theme = { TextColor3 = "Text" },
+		Parent = frame,
+	})
+	FontRegistry[source] = nil -- stays monospace when the UI font changes
+
+	local copyState = { Hovered = false }
+	local copy = New("TextButton", {
+		Name = "Copy",
+		AnchorPoint = Vector2.new(1, 0),
+		Position = UDim2.new(1, 34, 0, -5),
+		Size = UDim2.fromOffset(26, 26),
+		Theme = {
+			BackgroundColor3 = "Hover",
+			BackgroundTransparency = function(t)
+				return copyState.Hovered and t.HoverTransparency - 0.03 or 1
+			end,
+		},
+		Parent = frame,
+	})
+	Corner(copy, 6)
+	IconImage({
+		Icon = "copy",
+		IconSize = 14,
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Theme = { ImageColor3 = "SubText" },
+		Parent = copy,
+	})
+	copy.MouseEnter:Connect(function()
+		copyState.Hovered = true
+		Restyle(copy, 0.1)
+	end)
+	copy.MouseLeave:Connect(function()
+		copyState.Hovered = false
+		Restyle(copy, 0.15)
+	end)
+	copy.MouseButton1Click:Connect(function()
+		if CopyToClipboard(Code.Value) then
+			row.Window:Toast("Copied to Clipboard", { Icon = "clipboard" })
+		else
+			row.Window:Toast("Clipboard isn’t available", { Icon = "x-circle" })
+		end
+	end)
+	row.Window:_AttachTooltip(copy, "Copy")
+
+	function Code:SetCode(text)
+		self.Value = tostring(text or "")
+		source.Text = self.Value
+	end
+	Code.SetValue = Code.SetCode
+	function Code:_Text()
+		return self.Value
+	end
+	return Register(idx, Code)
+end
+
+-- Full-width picture (banners, previews). Title/Description show underneath.
+function Container:AddImage(idx, info)
+	idx, info = ParseArgs(idx, info)
+	local row = CreateRow(self, {
+		Title = info.Title,
+		Description = info.Description,
+		Keywords = info.Keywords,
+		Tooltip = info.Tooltip,
+		DependsOn = info.DependsOn,
+		DependsMode = info.DependsMode,
+	}, { TitleWeight = Enum.FontWeight.Medium })
+	row.FullWidthText = true
+	row.ForceStack = true
+	row:_UpdateLayout()
+	row:_UpdateReserve()
+	local ImageElement = NewElement("Image", row, info)
+	local image = New("ImageLabel", {
+		Name = "Image",
+		Image = MacUI:GetIcon(info.Image) or tostring(info.Image or ""),
+		Size = UDim2.new(1, 0, 0, info.Height or 150),
+		ScaleType = Enum.ScaleType[info.ScaleType or "Crop"],
+		BackgroundTransparency = 0,
+		LayoutOrder = -2,
+		Theme = { BackgroundColor3 = "Field" },
+		Parent = row.Stack,
+	})
+	Corner(image, 8)
+	if row.Title ~= "" or row.Description ~= "" then
+		New("Frame", { Name = "Gap", BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 4), LayoutOrder = -1, Parent = row.Stack })
+	end
+	function ImageElement:SetImage(value)
+		image.Image = MacUI:GetIcon(value) or tostring(value or "")
+	end
+	function ImageElement:SetHeight(height)
+		image.Size = UDim2.new(1, 0, 0, height)
+	end
+	return Register(idx, ImageElement)
+end
 
 --------------------------------------------------------------------------------
 -- Groups, sections and tabs
@@ -2859,7 +3955,7 @@ end
 function TabMethods:_RefreshSpacers()
 	local first = true
 	for _, block in ipairs(self.Blocks) do
-		local visible = block.Group and block.Group.Frame.Visible
+		local visible = (block.Group and block.Group.Frame.Visible) or (block.Hero ~= nil and block.Hero.Visible)
 		block.Spacer.Visible = visible and not first
 		if visible then
 			first = false
@@ -2940,6 +4036,7 @@ function TabMethods:AddSection(info)
 		Parent = header,
 	})
 	block.Header = header
+	block.Title = info.Title
 	block.SearchText = ((info.Title or "") .. " " .. (info.Description or "")):lower()
 	block.Group = CreateGroup(self, block)
 	self.CurrentGroup = nil
@@ -2953,6 +4050,7 @@ function TabMethods:AddSection(info)
 	}, SectionMethods)
 	function section:SetTitle(text)
 		self.Title = text
+		block.Title = tostring(text)
 		titleLabel.Text = tostring(text)
 		block.SearchText = (tostring(text) .. " " .. descLabel.Text):lower()
 	end
@@ -2970,12 +4068,15 @@ end
 
 function TabMethods:_ApplySearch(query)
 	local count = 0
+	if self.Hero then
+		self.Hero.Visible = query == ""
+	end
 	for _, block in ipairs(self.Blocks) do
 		if block.Group then
 			local sectionHit = query ~= "" and block.SearchText ~= nil and block.SearchText:find(query, 1, true) ~= nil
 			for _, row in ipairs(block.Group.Rows) do
 				row.SearchMatch = query == "" or sectionHit or row:_Matches(query)
-				row.Frame.Visible = row.UserVisible and row.SearchMatch
+				row.Frame.Visible = row:_IsShown() and row.SearchMatch
 				if row.Frame.Visible then
 					count += 1
 				end
@@ -2983,6 +4084,7 @@ function TabMethods:_ApplySearch(query)
 			block.Group:Refresh()
 		end
 	end
+	self:_RefreshSpacers()
 	return count
 end
 
@@ -2993,12 +4095,134 @@ end
 function TabMethods:SetTitle(text)
 	self.Title = tostring(text)
 	self.Label.Text = self.Title
+	if self.HeroTitle then
+		self.HeroTitle.Text = self.Title
+	end
 end
 
 function TabMethods:SetBadge(value)
 	local text = value ~= nil and value ~= false and value ~= 0 and tostring(value) or nil
 	self.Badge.Visible = text ~= nil
 	self.BadgeLabel.Text = text or ""
+end
+
+--------------------------------------------------------------------------------
+-- Acrylic: blurs the game behind a GUI object. A nearly invisible Glass part is
+-- kept in front of the camera over the object's screen rectangle; with a
+-- DepthOfFieldEffect present, Roblox renders glass with a blurred backdrop.
+-- Requires graphics quality 8+ (or Automatic). Off unless Acrylic = true.
+--------------------------------------------------------------------------------
+
+local function AcrylicSupported()
+	local ok, level = pcall(function()
+		return UserSettings():GetService("UserGameSettings").SavedQualityLevel
+	end)
+	if ok and typeof(level) == "EnumItem" and level ~= Enum.SavedQualitySetting.Automatic then
+		return level.Value >= 8
+	end
+	return true
+end
+
+local function CreateAcrylic(target)
+	local controller = { Enabled = false }
+	local Lighting = GetService("Lighting")
+	local effect = Instance.new("DepthOfFieldEffect")
+	effect.Name = "MacUI_Acrylic"
+	effect.FarIntensity = 0
+	effect.InFocusRadius = 0.1
+	effect.NearIntensity = 1
+	local part = Instance.new("Part")
+	part.Name = "MacUI_Acrylic"
+	part.Color = Color3.new(0, 0, 0)
+	part.Material = Enum.Material.Glass
+	part.Size = Vector3.new(1, 1, 0)
+	part.Anchored = true
+	part.CanCollide = false
+	part.CanQuery = false
+	part.CanTouch = false
+	part.CastShadow = false
+	part.Locked = true
+	part.Transparency = 1
+	local mesh = Instance.new("SpecialMesh")
+	mesh.MeshType = Enum.MeshType.Brick
+	mesh.Offset = Vector3.new(0, 0, -0.000001)
+	mesh.Parent = part
+	local suspended = {}
+	local connection
+
+	local function Suspend()
+		for _, container in ipairs({ Lighting, Workspace.CurrentCamera }) do
+			for _, child in ipairs(container and container:GetChildren() or {}) do
+				if child:IsA("DepthOfFieldEffect") and child ~= effect and child.Enabled then
+					suspended[child] = true
+					child.Enabled = false
+				end
+			end
+		end
+	end
+
+	local function Resume()
+		for other in pairs(suspended) do
+			pcall(function()
+				other.Enabled = true
+			end)
+		end
+		table.clear(suspended)
+	end
+
+	local function Render()
+		local camera = Workspace.CurrentCamera
+		local size = target.AbsoluteSize
+		if not camera or not controller.Enabled or not target.Visible or size.X < 2 or size.Y < 2 then
+			part.Transparency = 1
+			return
+		end
+		if part.Parent ~= camera then
+			part.Parent = camera
+		end
+		local position = target.AbsolutePosition
+		local function World(x, y)
+			local ray = camera:ScreenPointToRay(x, y)
+			return ray.Origin + ray.Direction * 0.001
+		end
+		local topLeft = World(position.X, position.Y)
+		local topRight = World(position.X + size.X, position.Y)
+		local bottomRight = World(position.X + size.X, position.Y + size.Y)
+		local frame = camera.CFrame
+		part.CFrame = CFrame.fromMatrix((topLeft + bottomRight) / 2, frame.XVector, frame.YVector, frame.ZVector)
+		mesh.Scale = Vector3.new((topRight - topLeft).Magnitude, (topRight - bottomRight).Magnitude, 0)
+		part.Transparency = 0.98
+	end
+
+	function controller:SetEnabled(enabled)
+		enabled = enabled == true
+		if enabled == self.Enabled then
+			return
+		end
+		self.Enabled = enabled
+		if enabled then
+			Suspend()
+			effect.Parent = Lighting
+			connection = RunService.RenderStepped:Connect(Render)
+			Render()
+		else
+			if connection then
+				connection:Disconnect()
+				connection = nil
+			end
+			effect.Parent = nil
+			part.Transparency = 1
+			Resume()
+		end
+	end
+
+	function controller:Destroy()
+		self:SetEnabled(false)
+		effect:Destroy()
+		part:Destroy()
+	end
+
+	return controller
 end
 
 --------------------------------------------------------------------------------
@@ -3016,6 +4240,20 @@ end
 
 function MacUI:CreateWindow(config)
 	config = config or {}
+	-- Re-running a script shouldn't stack a second copy of its window.
+	if config.ReplaceExisting ~= false and type(shared) == "table" then
+		local registry = shared.__MacUIWindows
+		if type(registry) ~= "table" then
+			registry = {}
+			shared.__MacUIWindows = registry
+		end
+		local key = tostring(config.Title or "MacUI")
+		local previous = registry[key]
+		if previous and previous ~= self and not previous.Unloaded then
+			pcall(previous.Destroy, previous)
+		end
+		registry[key] = self
+	end
 	if config.Theme and self.Themes[config.Theme] then
 		self:SetTheme(config.Theme, true)
 	end
@@ -3046,8 +4284,12 @@ function MacUI:CreateWindow(config)
 		Scale = 1,
 		Size = size,
 		Connections = {},
+		Shown = false,
+		Acrylic = false,
+		StateChanged = Signal.new(),
 	}
 	table.insert(self.Windows, Window)
+	local Cleanup = {}
 
 	local function Connect(signal, fn)
 		local connection = signal:Connect(fn)
@@ -3080,7 +4322,16 @@ function MacUI:CreateWindow(config)
 	function Window:GetAbsoluteScale()
 		return RootScale.Scale
 	end
-	local WindowShadow = Shadow(Root, 44)
+	local WindowShadow = Shadow(Root, 58, function(t)
+		return Window.Shown and t.ShadowTransparency or 1
+	end)
+	WindowShadow.Name = "AmbientShadow"
+	WindowShadow.ImageTransparency = 1
+	local ContactShadow = Shadow(Root, 14, function(t)
+		return Window.Shown and math.min(t.ShadowTransparency + 0.25, 1) or 1
+	end)
+	ContactShadow.Name = "ContactShadow"
+	ContactShadow.ImageTransparency = 1
 	local AnimGroup = New("CanvasGroup", {
 		Name = "Transition",
 		BackgroundTransparency = 1,
@@ -3093,12 +4344,32 @@ function MacUI:CreateWindow(config)
 		Name = "Holder",
 		Size = UDim2.fromScale(1, 1),
 		Active = true, -- clicks on the window never reach the game world
+		BackgroundTransparency = 1,
 		ZIndex = 2,
-		Theme = { BackgroundColor3 = "Background" },
 		Parent = Root,
 	})
 	Corner(Holder, 12)
-	Stroke(Holder, "WindowStroke", 1, 0.1)
+	New("UIStroke", {
+		Thickness = 1,
+		ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+		Theme = { Color = "WindowBorder", Transparency = "WindowBorderTransparency" },
+		Parent = Holder,
+	})
+	local Bezel = New("Frame", {
+		Name = "Bezel",
+		BackgroundTransparency = 1,
+		Position = UDim2.fromOffset(1, 1),
+		Size = UDim2.new(1, -2, 1, -2),
+		ZIndex = 60,
+		Parent = Holder,
+	})
+	Corner(Bezel, 11)
+	New("UIStroke", {
+		Thickness = 1,
+		ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
+		Theme = { Color = "WindowHighlight", Transparency = "WindowHighlightTransparency" },
+		Parent = Bezel,
+	})
 
 	-- Popups (menus, color picker) render above everything in this window.
 	local PopupLayer = New("Frame", {
@@ -3111,25 +4382,109 @@ function MacUI:CreateWindow(config)
 	Window.PopupLayer = PopupLayer
 
 	----------------------------------------------------------------------------
+	-- Tooltips (macOS help tags)
+	----------------------------------------------------------------------------
+
+	local TooltipFrame, TooltipLabel, TooltipScale
+	local tooltipToken = 0
+
+	local function HideTooltip()
+		tooltipToken += 1
+		if TooltipFrame then
+			TooltipFrame.Visible = false
+		end
+	end
+
+	local function ShowTooltip(text)
+		if not TooltipFrame then
+			TooltipFrame = New("Frame", {
+				Name = "Tooltip",
+				Size = UDim2.fromOffset(0, 0),
+				AutomaticSize = Enum.AutomaticSize.XY,
+				Visible = false,
+				ZIndex = 200,
+				Theme = { BackgroundColor3 = "Menu" },
+				Parent = PopupLayer,
+			})
+			Corner(TooltipFrame, 6)
+			Stroke(TooltipFrame, "MenuStroke", 1, 0.1)
+			Padding(TooltipFrame, 5, 8, 5, 8)
+			TooltipScale = New("UIScale", { Parent = TooltipFrame })
+			TooltipLabel = New("TextLabel", {
+				Name = "Text",
+				TextSize = 12,
+				Size = UDim2.fromOffset(0, 0),
+				AutomaticSize = Enum.AutomaticSize.Y,
+				TextWrapped = true,
+				TextXAlignment = Enum.TextXAlignment.Left,
+				ZIndex = 201,
+				Theme = { TextColor3 = "Text" },
+				Parent = TooltipFrame,
+			})
+		end
+		local scale = Window.Scale
+		TooltipScale.Scale = scale
+		TooltipLabel.Text = text
+		-- One line up to 260px, then wrap.
+		TooltipLabel.Size = UDim2.fromOffset(math.min(math.ceil(MeasureText(text, 12)) + 2, 260), 0)
+		local mouse = MousePosition() - PopupLayer.AbsolutePosition
+		local screen = PopupLayer.AbsoluteSize
+		local flip = mouse.X > screen.X - 290 * scale
+		TooltipFrame.AnchorPoint = Vector2.new(flip and 1 or 0, 0)
+		TooltipFrame.Position = UDim2.fromOffset(mouse.X + (flip and -6 or 12), math.min(mouse.Y + 20, screen.Y - 40 * scale))
+		TooltipFrame.Visible = true
+	end
+
+	-- Shows `text` (a string or a function returning one) after hovering `gui`.
+	function Window:_AttachTooltip(gui, text)
+		gui.MouseEnter:Connect(function()
+			tooltipToken += 1
+			local token = tooltipToken
+			task.delay(0.6, function()
+				if token ~= tooltipToken or Window.ActivePopup or not gui.Parent or not Root.Visible then
+					return
+				end
+				local value = text
+				if type(text) == "function" then
+					local ok, result = pcall(text)
+					value = ok and result or nil
+				end
+				if value and value ~= "" then
+					ShowTooltip(tostring(value))
+				end
+			end)
+		end)
+		gui.MouseLeave:Connect(HideTooltip)
+		gui.InputBegan:Connect(function(input)
+			if IsPointer(input) then
+				HideTooltip()
+			end
+		end)
+	end
+
+	----------------------------------------------------------------------------
 	-- Sidebar
 	----------------------------------------------------------------------------
 
+	local function GlassTransparency(t)
+		return Window.Acrylic and t.GlassTransparency or 0
+	end
 	local Sidebar = New("Frame", {
 		Name = "Sidebar",
 		Size = UDim2.new(0, sidebarWidth, 1, 0),
+		BackgroundTransparency = 1,
 		ClipsDescendants = true,
-		Theme = { BackgroundColor3 = "Sidebar" },
 		Parent = Holder,
 	})
-	Corner(Sidebar, 12)
-	New("Frame", {
-		Name = "Square",
-		AnchorPoint = Vector2.new(1, 0),
-		Position = UDim2.fromScale(1, 0),
-		Size = UDim2.new(0, 14, 1, 0),
-		Theme = { BackgroundColor3 = "Sidebar" },
+	-- One rounded layer that runs 14px past the (rectangular) clip: rounded
+	-- on the left, square on the right, and translucent without overlaps.
+	local SidebarGlass = New("Frame", {
+		Name = "Glass",
+		Size = UDim2.new(1, 14, 1, 0),
+		Theme = { BackgroundColor3 = "Sidebar", BackgroundTransparency = GlassTransparency },
 		Parent = Sidebar,
 	})
+	Corner(SidebarGlass, 12)
 	New("Frame", {
 		Name = "Divider",
 		AnchorPoint = Vector2.new(1, 0),
@@ -3257,10 +4612,24 @@ function MacUI:CreateWindow(config)
 
 	local Main = New("Frame", {
 		Name = "Main",
-		BackgroundTransparency = 1,
 		Position = UDim2.fromOffset(sidebarWidth, 0),
 		Size = UDim2.new(1, -sidebarWidth, 1, 0),
+		Theme = { BackgroundColor3 = "Background" },
 		Parent = Holder,
+	})
+	Corner(Main, 12)
+	-- squares off Main's left corners while the sidebar is showing
+	local MainSquare = New("Frame", {
+		Name = "Square",
+		Size = UDim2.new(0, 14, 1, 0),
+		ZIndex = 0,
+		Theme = {
+			BackgroundColor3 = "Background",
+			BackgroundTransparency = function()
+				return Window.SidebarVisible and 0 or 1
+			end,
+		},
+		Parent = Main,
 	})
 	local Toolbar = New("Frame", {
 		Name = "Toolbar",
@@ -3405,6 +4774,23 @@ function MacUI:CreateWindow(config)
 		Theme = { TextColor3 = "Text", PlaceholderColor3 = "SubText" },
 		Parent = Search,
 	})
+	local SpotlightHint = New("TextButton", {
+		Name = "SpotlightHint",
+		Text = "Ctrl K",
+		TextSize = 11,
+		Weight = Enum.FontWeight.Medium,
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -6, 0.5, 0),
+		Size = UDim2.fromOffset(0, 18),
+		AutomaticSize = Enum.AutomaticSize.X,
+		BackgroundTransparency = 0,
+		Visible = config.Spotlight ~= false and UserInputService.KeyboardEnabled,
+		ZIndex = 3,
+		Theme = { BackgroundColor3 = "Control", TextColor3 = "SubText" },
+		Parent = Search,
+	})
+	Corner(SpotlightHint, 5)
+	Padding(SpotlightHint, 0, 6, 0, 6)
 	local SearchClear = New("TextButton", {
 		Name = "Clear",
 		AnchorPoint = Vector2.new(1, 0.5),
@@ -3424,6 +4810,13 @@ function MacUI:CreateWindow(config)
 		Theme = { ImageColor3 = "Search" },
 		Parent = SearchClear,
 	})
+
+	Window:_AttachTooltip(SidebarButton, function()
+		return Window.SidebarVisible and "Hide Sidebar" or "Show Sidebar"
+	end)
+	Window:_AttachTooltip(BackButton, "Back")
+	Window:_AttachTooltip(ForwardButton, "Forward")
+	Window:_AttachTooltip(SpotlightHint, "Search everything (Ctrl+K)")
 
 	local PageHost = New("Frame", {
 		Name = "Pages",
@@ -3621,6 +5014,9 @@ function MacUI:CreateWindow(config)
 		if self._ClosePopup then
 			self:_ClosePopup(true)
 		end
+		if self._OnScale then
+			self:_OnScale(scale)
+		end
 		for _, tab in ipairs(self.Tabs) do
 			for _, row in ipairs(tab.Rows) do
 				row:_UpdateReserve()
@@ -3669,6 +5065,7 @@ function MacUI:CreateWindow(config)
 	function Window:_OpenPopup(anchor, width, height, build, options)
 		options = options or {}
 		self:_ClosePopup(true)
+		HideTooltip()
 		local scale = self.Scale
 		local popup = { Connections = {} }
 		function popup:Connect(signal, fn)
@@ -3723,14 +5120,19 @@ function MacUI:CreateWindow(config)
 
 		local layerPos = PopupLayer.AbsolutePosition
 		local screen = PopupLayer.AbsoluteSize
-		local anchorPos = anchor.AbsolutePosition - layerPos
-		local anchorSize = anchor.AbsoluteSize
+		local anchorPos, anchorSize, gap
+		if typeof(anchor) == "Vector2" then
+			anchorPos, anchorSize, gap = anchor - layerPos, Vector2.new(0, 0), 2
+			options.Align = "Left"
+		else
+			anchorPos, anchorSize, gap = anchor.AbsolutePosition - layerPos, anchor.AbsoluteSize, 6 * scale
+		end
 		local w, h = width * scale, height * scale
 		local x = options.Align == "Left" and anchorPos.X or (anchorPos.X + anchorSize.X - w)
 		x = math.clamp(x, 8, math.max(screen.X - w - 8, 8))
-		local y = anchorPos.Y + anchorSize.Y + 6 * scale
+		local y = anchorPos.Y + anchorSize.Y + gap
 		if y + h > screen.Y - 8 then
-			y = anchorPos.Y - h - 6 * scale
+			y = anchorPos.Y - h - gap
 		end
 		y = math.clamp(y, 8, math.max(screen.Y - h - 8, 8))
 		popup.Holder.Position = UDim2.fromOffset(x, y)
@@ -3927,9 +5329,290 @@ function MacUI:CreateWindow(config)
 		end, { Align = options.Align })
 	end
 
+	-- Right-click menu. `items` are { Text, Icon?, Shortcut?, Disabled?, Destructive?, Callback } or "-".
+	function Window:_OpenContextMenu(point, items)
+		if not items or #items == 0 then
+			return
+		end
+		local itemHeight, separatorHeight = 24, 9
+		local hasIcons, widest, height = false, 0, 10
+		for _, item in ipairs(items) do
+			if item == "-" then
+				height += separatorHeight
+			else
+				height += itemHeight
+				hasIcons = hasIcons or item.Icon ~= nil
+				local extra = item.Shortcut and (MeasureText(item.Shortcut, 12) + 24) or 0
+				widest = math.max(widest, MeasureText(item.Text, 13) + extra)
+			end
+		end
+		local width = math.clamp(widest + (hasIcons and 44 or 24) + 10, 180, 320)
+		return self:_OpenPopup(point, width, height, function(canvas)
+			local list = New("Frame", {
+				Name = "Items",
+				BackgroundTransparency = 1,
+				Size = UDim2.fromScale(1, 1),
+				Parent = canvas,
+			})
+			Padding(list, 5, 5, 5, 5)
+			List(list, nil, 0)
+			for index, item in ipairs(items) do
+				if item == "-" then
+					local separator = New("Frame", {
+						Name = "Separator",
+						BackgroundTransparency = 1,
+						Size = UDim2.new(1, 0, 0, separatorHeight),
+						LayoutOrder = index,
+						Parent = list,
+					})
+					New("Frame", {
+						AnchorPoint = Vector2.new(0, 0.5),
+						Position = UDim2.new(0, 8, 0.5, 0),
+						Size = UDim2.new(1, -16, 0, 1),
+						Theme = { BackgroundColor3 = "Separator" },
+						Parent = separator,
+					})
+				else
+					local state = { Hovered = false }
+					local function Foreground(t, normal)
+						if item.Disabled then
+							return t.Tertiary
+						elseif state.Hovered then
+							return t.SelectionText
+						elseif item.Destructive then
+							return t.Destructive
+						end
+						return normal
+					end
+					local button = New("TextButton", {
+						Name = "Item",
+						Size = UDim2.new(1, 0, 0, itemHeight),
+						LayoutOrder = index,
+						Theme = {
+							BackgroundColor3 = function(t)
+								return item.Destructive and t.Destructive or MacUI.Accent
+							end,
+							BackgroundTransparency = function()
+								return state.Hovered and 0 or 1
+							end,
+						},
+						Parent = list,
+					})
+					Corner(button, 5)
+					local painted = { button }
+					if item.Icon then
+						table.insert(painted, IconImage({
+							Icon = item.Icon,
+							IconSize = 14,
+							AnchorPoint = Vector2.new(0, 0.5),
+							Position = UDim2.new(0, 9, 0.5, 0),
+							Theme = {
+								ImageColor3 = function(t)
+									return Foreground(t, t.SubText)
+								end,
+							},
+							Parent = button,
+						}))
+					end
+					table.insert(painted, New("TextLabel", {
+						Text = item.Text,
+						TextSize = 13,
+						Position = UDim2.fromOffset(hasIcons and 31 or 10, 0),
+						Size = UDim2.new(1, -(hasIcons and 41 or 20), 1, 0),
+						TextTruncate = Enum.TextTruncate.AtEnd,
+						Theme = {
+							TextColor3 = function(t)
+								return Foreground(t, t.Text)
+							end,
+						},
+						Parent = button,
+					}))
+					if item.Shortcut then
+						table.insert(painted, New("TextLabel", {
+							Text = item.Shortcut,
+							TextSize = 12,
+							AnchorPoint = Vector2.new(1, 0),
+							Position = UDim2.new(1, -10, 0, 0),
+							Size = UDim2.new(0, 80, 1, 0),
+							TextXAlignment = Enum.TextXAlignment.Right,
+							Theme = {
+								TextColor3 = function(t)
+									return Foreground(t, t.Tertiary)
+								end,
+							},
+							Parent = button,
+						}))
+					end
+					local function Paint(duration)
+						for _, object in ipairs(painted) do
+							Restyle(object, duration)
+						end
+					end
+					button.MouseEnter:Connect(function()
+						if not item.Disabled then
+							state.Hovered = true
+							Paint(0.05)
+						end
+					end)
+					button.MouseLeave:Connect(function()
+						state.Hovered = false
+						Paint(0.1)
+					end)
+					button.MouseButton1Click:Connect(function()
+						if item.Disabled then
+							return
+						end
+						self:_ClosePopup()
+						Spawn(item.Callback)
+					end)
+				end
+			end
+		end)
+	end
+
+	-- A short-lived HUD at the bottom of the screen ("Auto Farm  On").
+	local ActiveToast
+	function Window:Toast(text, options)
+		options = options or {}
+		if MacUI.Unloaded then
+			return
+		end
+		if ActiveToast then
+			ActiveToast.Close(true)
+		end
+		text = tostring(text)
+		local scale = Window.Scale
+		local detail = options.Detail and tostring(options.Detail)
+		local width = 36 + (options.Icon and 24 or 0) + MeasureText(text, 14, Enum.FontWeight.Medium)
+		if detail then
+			width += MeasureText(detail, 14, Enum.FontWeight.Medium) + 8
+		end
+		width = math.clamp(math.ceil(width), 110, 440)
+		local toast = { Shown = true }
+		local position = UDim2.new(0.5, 0, 1, -90)
+		if Window.Shown and not Window.Minimized then
+			local layer = PopupLayer.AbsolutePosition
+			local rootPosition, rootSize = Root.AbsolutePosition, Root.AbsoluteSize
+			position = UDim2.fromOffset(
+				rootPosition.X - layer.X + rootSize.X / 2,
+				rootPosition.Y - layer.Y + rootSize.Y - 22 * RootScale.Scale
+			)
+		end
+		local holder = New("Frame", {
+			Name = "Toast",
+			BackgroundTransparency = 1,
+			AnchorPoint = Vector2.new(0.5, 1),
+			Position = position,
+			Size = UDim2.fromOffset(width, 40),
+			ZIndex = 150,
+			Parent = PopupLayer,
+		})
+		local toastScale = New("UIScale", { Scale = scale * 0.9, Parent = holder })
+		local shadow = Shadow(holder, 22, function(t)
+			return toast.Shown and math.min(t.ShadowTransparency + 0.15, 1) or 1
+		end)
+		shadow.ImageTransparency = 1
+		local body = New("CanvasGroup", {
+			Name = "Body",
+			Size = UDim2.fromScale(1, 1),
+			GroupTransparency = 1,
+			ZIndex = 2,
+			Theme = { BackgroundColor3 = "Menu" },
+			Parent = holder,
+		})
+		Corner(body, 20)
+		local border = New("Frame", {
+			BackgroundTransparency = 1,
+			Position = UDim2.fromOffset(1, 1),
+			Size = UDim2.new(1, -2, 1, -2),
+			ZIndex = 5,
+			Parent = body,
+		})
+		Corner(border, 19)
+		Stroke(border, "MenuStroke", 1, 0.15)
+		local content = New("Frame", {
+			BackgroundTransparency = 1,
+			Size = UDim2.fromScale(1, 1),
+			Parent = body,
+		})
+		List(content, Enum.FillDirection.Horizontal, 8, {
+			HorizontalAlignment = Enum.HorizontalAlignment.Center,
+			VerticalAlignment = Enum.VerticalAlignment.Center,
+		})
+		if options.Icon then
+			IconImage({
+				Icon = options.Icon,
+				IconSize = 16,
+				LayoutOrder = 1,
+				Theme = { ImageColor3 = options.Highlight and "Accent" or "SubText" },
+				Parent = content,
+			})
+		end
+		New("TextLabel", {
+			Text = text,
+			TextSize = 14,
+			Weight = Enum.FontWeight.Medium,
+			Size = UDim2.fromOffset(0, 18),
+			AutomaticSize = Enum.AutomaticSize.X,
+			LayoutOrder = 2,
+			Theme = { TextColor3 = "Text" },
+			Parent = content,
+		})
+		if detail then
+			New("TextLabel", {
+				Text = detail,
+				TextSize = 14,
+				Weight = Enum.FontWeight.Medium,
+				Size = UDim2.fromOffset(0, 18),
+				AutomaticSize = Enum.AutomaticSize.X,
+				LayoutOrder = 3,
+				Theme = { TextColor3 = options.Highlight and "Accent" or "SubText" },
+				Parent = content,
+			})
+		end
+		Tween(body, { GroupTransparency = 0 }, 0.18)
+		Tween(toastScale, { Scale = scale }, 0.3, Enum.EasingStyle.Back)
+		Restyle(shadow, 0.2)
+		local closed = false
+		function toast.Close(instant)
+			if closed then
+				return
+			end
+			closed = true
+			toast.Shown = false
+			if ActiveToast == toast then
+				ActiveToast = nil
+			end
+			if instant then
+				holder:Destroy()
+				return
+			end
+			Tween(body, { GroupTransparency = 1 }, 0.25)
+			Tween(toastScale, { Scale = scale * 0.95 }, 0.25)
+			Restyle(shadow, 0.2)
+			task.delay(0.26, function()
+				holder:Destroy()
+			end)
+		end
+		ActiveToast = toast
+		task.delay(options.Duration or 1.4, toast.Close)
+		return toast
+	end
+
 	----------------------------------------------------------------------------
 	-- Tabs
 	----------------------------------------------------------------------------
+
+	local stateToken = 0
+	local function EmitState()
+		stateToken += 1
+		local token = stateToken
+		task.delay(0.3, function()
+			if token == stateToken and not MacUI.Unloaded then
+				Window.StateChanged:Fire(Window:GetState())
+			end
+		end)
+	end
 
 	local function MovePill(animate)
 		local tab = Window.CurrentTab
@@ -4014,9 +5697,12 @@ function MacUI:CreateWindow(config)
 
 		local textOffset = 12
 		local icon = info.Icon
+		tab.TileColor = ResolveColor(info.IconColor) or MacUI.TileColors[(index - 1) % #MacUI.TileColors + 1]
+		tab.Icon = icon and MacUI:GetIcon(icon) and icon or nil
+		tab.Description = info.Description
 		if icon and MacUI:GetIcon(icon) then
 			if sidebarStyle == "Tile" then
-				local color = ResolveColor(info.IconColor) or MacUI.TileColors[(index - 1) % #MacUI.TileColors + 1]
+				local color = tab.TileColor
 				IconTile(button, icon, color, 22, 6, 14, {
 					AnchorPoint = Vector2.new(0, 0.5),
 					Position = UDim2.new(0, 5, 0.5, 0),
@@ -4127,12 +5813,60 @@ function MacUI:CreateWindow(config)
 		Padding(tab.Content, 6, 22, 26, 22)
 		List(tab.Content, nil, 0)
 
+		-- System Settings pane header: big icon, title and a short description.
+		if info.Description then
+			local block = tab:_NewBlock(0)
+			local hero = New("Frame", {
+				Name = "Hero",
+				Size = UDim2.new(1, 0, 0, 0),
+				AutomaticSize = Enum.AutomaticSize.Y,
+				LayoutOrder = tab:_NextOrder(),
+				Theme = { BackgroundColor3 = "Group" },
+				Parent = tab.Content,
+			})
+			Corner(hero, 12)
+			Stroke(hero, "GroupStroke")
+			Padding(hero, 22, 30, 20, 30)
+			List(hero, nil, 4, { HorizontalAlignment = Enum.HorizontalAlignment.Center })
+			IconTile(hero, tab.Icon or "layers", tab.TileColor, 60, 15, 32, { LayoutOrder = 1 })
+			New("Frame", { Name = "Gap", BackgroundTransparency = 1, Size = UDim2.fromOffset(1, 6), LayoutOrder = 2, Parent = hero })
+			tab.HeroTitle = New("TextLabel", {
+				Name = "Title",
+				Text = tab.Title,
+				TextSize = 20,
+				Weight = Enum.FontWeight.Bold,
+				Size = UDim2.new(1, 0, 0, 0),
+				AutomaticSize = Enum.AutomaticSize.Y,
+				TextWrapped = true,
+				TextXAlignment = Enum.TextXAlignment.Center,
+				LayoutOrder = 3,
+				Theme = { TextColor3 = "Text" },
+				Parent = hero,
+			})
+			New("TextLabel", {
+				Name = "Description",
+				Text = tostring(info.Description),
+				TextSize = 13,
+				Size = UDim2.new(1, 0, 0, 0),
+				AutomaticSize = Enum.AutomaticSize.Y,
+				TextWrapped = true,
+				RichText = true,
+				TextXAlignment = Enum.TextXAlignment.Center,
+				LayoutOrder = 4,
+				Theme = { TextColor3 = "SubText" },
+				Parent = hero,
+			})
+			block.Hero = hero
+			tab.Hero = hero
+		end
+
 		local hideToken = 0
 		tab.Page:GetPropertyChangedSignal("CanvasPosition"):Connect(function()
 			if Window.CurrentTab ~= tab then
 				return
 			end
 			UpdateToolbarDivider()
+			HideTooltip()
 			hideToken += 1
 			local token = hideToken
 			Tween(tab.Page, { ScrollBarImageTransparency = 0.35 }, 0.1)
@@ -4200,6 +5934,7 @@ function MacUI:CreateWindow(config)
 		UpdateNavigation()
 		UpdateToolbarDivider()
 		EmptyState.Visible = Window.SearchQuery ~= "" and not tab.HasResults
+		EmitState()
 	end
 
 	function Window:GoBack()
@@ -4255,7 +5990,6 @@ function MacUI:CreateWindow(config)
 
 	local searchToken = 0
 	SearchBox:GetPropertyChangedSignal("Text"):Connect(function()
-		SearchClear.Visible = SearchBox.Text ~= ""
 		searchToken += 1
 		local token = searchToken
 		task.delay(0.08, function()
@@ -4266,15 +6000,65 @@ function MacUI:CreateWindow(config)
 			Window:_ApplySearch()
 		end)
 	end)
+	local function UpdateSearchChrome()
+		local empty = SearchBox.Text == ""
+		SearchClear.Visible = not empty
+		SpotlightHint.Visible = config.Spotlight ~= false and empty and not SearchBox:IsFocused() and UserInputService.KeyboardEnabled
+	end
+	SearchBox:GetPropertyChangedSignal("Text"):Connect(UpdateSearchChrome)
 	SearchBox.Focused:Connect(function()
 		Tween(SearchStroke, { Transparency = 0.55 }, 0.15)
+		UpdateSearchChrome()
 	end)
-	SearchBox.FocusLost:Connect(function()
+	SearchBox.FocusLost:Connect(function(enterPressed)
 		Tween(SearchStroke, { Transparency = 1 }, 0.2)
+		UpdateSearchChrome()
+		if enterPressed and SearchBox.Text ~= "" then
+			Window.SearchQuery = SearchBox.Text:lower():gsub("^%s+", ""):gsub("%s+$", "")
+			Window:_ApplySearch()
+			for _, row in ipairs(Window.CurrentTab and Window.CurrentTab.Rows or {}) do
+				if row.Frame.Visible then
+					Window:Reveal(row)
+					break
+				end
+			end
+		end
 	end)
 	SearchClear.MouseButton1Click:Connect(function()
 		SearchBox.Text = ""
 	end)
+
+	-- Scrolls a row (element, row or option index) into view and flashes it.
+	function Window:Reveal(target)
+		if type(target) == "string" then
+			target = MacUI.Options[target]
+		end
+		local row = type(target) == "table" and (target.Row or target) or nil
+		if not row or not row.Frame or row.Destroyed or row.Window ~= Window then
+			return
+		end
+		if Window.Minimized then
+			Window:Restore()
+		end
+		if not row.Frame.Visible and Window.SearchQuery ~= "" then
+			SearchBox.Text = ""
+			Window.SearchQuery = ""
+			Window:_ApplySearch()
+		end
+		Window:SelectTab(row.Tab)
+		task.delay(0.08, function()
+			local page = row.Tab.Page
+			local scale = Window:GetAbsoluteScale()
+			local top = (row.Frame.AbsolutePosition.Y - row.Tab.Content.AbsolutePosition.Y) / scale
+			local view = page.AbsoluteSize.Y / scale
+			local canvas = page.AbsoluteCanvasSize.Y / scale
+			local goal = math.clamp(top - view * 0.3, 0, math.max(canvas - view, 0))
+			Tween(page, { CanvasPosition = Vector2.new(0, goal) }, 0.35)
+			task.delay(0.15, function()
+				row:Flash()
+			end)
+		end)
+	end
 
 	----------------------------------------------------------------------------
 	-- Sidebar collapse
@@ -4289,6 +6073,8 @@ function MacUI:CreateWindow(config)
 		Tween(Sidebar, { Size = UDim2.new(0, width, 1, 0) }, 0.32)
 		Tween(Main, { Position = UDim2.fromOffset(width, 0), Size = UDim2.new(1, -width, 1, 0) }, 0.32)
 		Tween(Leading, { Position = UDim2.new(0, Window.SidebarVisible and 12 or 84, 0.5, 0) }, 0.32)
+		Restyle(MainSquare, 0.32)
+		EmitState()
 		if not Window.SidebarVisible then
 			task.delay(0.33, function()
 				if not Window.SidebarVisible then
@@ -4384,6 +6170,9 @@ function MacUI:CreateWindow(config)
 	end)
 	Connect(UserInputService.InputEnded, function(input)
 		if IsPointer(input) then
+			if drag or resize then
+				EmitState()
+			end
 			drag = nil
 			resize = nil
 		end
@@ -4409,25 +6198,34 @@ function MacUI:CreateWindow(config)
 		transitionId += 1
 		local id = transitionId
 		Window:_ClosePopup(true)
+		HideTooltip()
+		Window.Shown = visible
 		if visible then
 			Root.Visible = true
 			BeginTransition()
 			AnimGroup.GroupTransparency = 1
 			RootScale.Scale = Window.Scale * 0.94
-			WindowShadow.ImageTransparency = 1
 			Tween(AnimGroup, { GroupTransparency = 0 }, instant and 0 or 0.28)
 			ScaleTween = Tween(RootScale, { Scale = Window.Scale }, instant and 0 or 0.4, Enum.EasingStyle.Quint)
-			Tween(WindowShadow, { ImageTransparency = MacUI.ThemeData.ShadowTransparency }, instant and 0 or 0.4)
+			Restyle(WindowShadow, instant and 0 or 0.4)
+			Restyle(ContactShadow, instant and 0 or 0.4)
 			task.delay(instant and 0 or 0.4, function()
 				if id == transitionId then
 					EndTransition()
+					if Window.Blur then
+						Window.Blur:SetEnabled(Window.Acrylic)
+					end
 				end
 			end)
 		else
+			if Window.Blur then
+				Window.Blur:SetEnabled(false)
+			end
 			BeginTransition()
 			Tween(AnimGroup, { GroupTransparency = 1 }, instant and 0 or 0.22)
 			ScaleTween = Tween(RootScale, { Scale = Window.Scale * 0.92 }, instant and 0 or 0.25, Enum.EasingStyle.Quint, Enum.EasingDirection.In)
-			Tween(WindowShadow, { ImageTransparency = 1 }, instant and 0 or 0.2)
+			Restyle(WindowShadow, instant and 0 or 0.2)
+			Restyle(ContactShadow, instant and 0 or 0.2)
 			task.delay(instant and 0 or 0.26, function()
 				if id == transitionId then
 					Root.Visible = false
@@ -4485,6 +6283,74 @@ function MacUI:CreateWindow(config)
 			Window.Size = restoreState.Size
 			Tween(Root, { Size = UDim2.fromOffset(restoreState.Size.X, restoreState.Size.Y), Position = restoreState.Position }, 0.38)
 		end
+		EmitState()
+	end
+
+	-- Position, size, tab and sidebar state (InterfaceManager saves this).
+	function Window:GetState()
+		local base = Window.Maximized and restoreState or { Size = Window.Size, Position = Root.Position }
+		return {
+			X = base.Position.X.Offset,
+			Y = base.Position.Y.Offset,
+			Width = base.Size.X,
+			Height = base.Size.Y,
+			Tab = Window.CurrentTab and Window.CurrentTab.Title or nil,
+			Sidebar = Window.SidebarVisible,
+		}
+	end
+
+	function Window:ApplyState(state)
+		if type(state) ~= "table" then
+			return
+		end
+		local width, height = tonumber(state.Width), tonumber(state.Height)
+		if width and height then
+			Window.Size = Vector2.new(math.max(width, minSize.X), math.max(height, minSize.Y))
+			Root.Size = UDim2.fromOffset(Window.Size.X, Window.Size.Y)
+		end
+		local x, y = tonumber(state.X), tonumber(state.Y)
+		if x and y then
+			local screen = ScreenGui.AbsoluteSize
+			if screen.X > 10 then
+				x = math.clamp(x, -screen.X / 2 + 60, screen.X / 2 - 60)
+				y = math.clamp(y, -screen.Y / 2 + 30, screen.Y / 2 - 30)
+			end
+			Root.Position = UDim2.new(0.5, x, 0.5, y)
+		end
+		if state.Tab then
+			for _, tab in ipairs(Window.Tabs) do
+				if tab.Title == state.Tab then
+					Window:SelectTab(tab)
+					break
+				end
+			end
+		end
+		if state.Sidebar == false then
+			Window:SetSidebarVisible(false)
+		end
+	end
+
+	function Window:SetAcrylic(enabled)
+		enabled = enabled == true and AcrylicSupported()
+		Window.Acrylic = enabled
+		Restyle(SidebarGlass, 0.25)
+		if enabled and not Window.Blur then
+			local ok, blur = pcall(CreateAcrylic, Sidebar)
+			if ok then
+				Window.Blur = blur
+				table.insert(Cleanup, function()
+					blur:Destroy()
+				end)
+			else
+				warn("[MacUI] acrylic unavailable: " .. tostring(blur))
+				Window.Acrylic = false
+				Restyle(SidebarGlass, 0)
+			end
+		end
+		if Window.Blur then
+			Window.Blur:SetEnabled(Window.Acrylic and Window.Shown and not Window.Minimized)
+		end
+		return Window.Acrylic
 	end
 
 	function Window:SetTitle(text)
@@ -4611,14 +6477,51 @@ function MacUI:CreateWindow(config)
 				Parent = body,
 			})
 		end
-		New("Frame", { BackgroundTransparency = 1, Size = UDim2.fromOffset(1, 8), LayoutOrder = 5, Parent = body })
+		local inputBox
+		if options.Input then
+			local spec = type(options.Input) == "table" and options.Input or {}
+			New("Frame", { BackgroundTransparency = 1, Size = UDim2.fromOffset(1, 4), LayoutOrder = 5, Parent = body })
+			local field = New("Frame", {
+				Name = "Field",
+				Size = UDim2.new(1, 0, 0, 28),
+				LayoutOrder = 6,
+				Theme = { BackgroundColor3 = "Field" },
+				Parent = body,
+			})
+			Corner(field, 6)
+			local fieldStroke = Stroke(field, "FieldStroke")
+			inputBox = New("TextBox", {
+				Name = "Input",
+				Text = tostring(spec.Default or ""),
+				PlaceholderText = spec.Placeholder or "",
+				TextSize = 13,
+				Position = UDim2.fromOffset(8, 0),
+				Size = UDim2.new(1, -16, 1, 0),
+				ClipsDescendants = true,
+				Theme = { TextColor3 = "Text", PlaceholderColor3 = "Tertiary" },
+				Parent = field,
+			})
+			inputBox.Focused:Connect(function()
+				Themed(fieldStroke, { Color = "Accent" })
+			end)
+			inputBox.FocusLost:Connect(function()
+				Themed(fieldStroke, { Color = "FieldStroke" })
+			end)
+			dialog.Input = inputBox
+			task.defer(function()
+				if inputBox.Parent then
+					inputBox:CaptureFocus()
+				end
+			end)
+		end
+		New("Frame", { BackgroundTransparency = 1, Size = UDim2.fromOffset(1, 8), LayoutOrder = 7, Parent = body })
 
 		local buttons = options.Buttons or { { Title = "OK" } }
 		local row = New("Frame", {
 			BackgroundTransparency = 1,
 			Size = UDim2.new(1, 0, 0, 0),
 			AutomaticSize = Enum.AutomaticSize.Y,
-			LayoutOrder = 6,
+			LayoutOrder = 8,
 			Parent = body,
 		})
 		local stacked = #buttons > 2
@@ -4652,7 +6555,15 @@ function MacUI:CreateWindow(config)
 			push.Instance.LayoutOrder = stacked and index or (count - index + 1)
 			push.Instance.MouseButton1Click:Connect(function()
 				dialog:Close()
-				Spawn(spec.Callback)
+				Spawn(spec.Callback, inputBox and inputBox.Text or nil)
+			end)
+		end
+		if inputBox and buttons[1] then
+			inputBox.FocusLost:Connect(function(enterPressed)
+				if enterPressed and not dialog.Closed then
+					dialog:Close()
+					Spawn(buttons[1].Callback, inputBox.Text)
+				end
 			end)
 		end
 
@@ -4708,8 +6619,684 @@ function MacUI:CreateWindow(config)
 		Window:Restore()
 	end)
 
+	----------------------------------------------------------------------------
+	-- Spotlight (Ctrl/Cmd + K): find any setting, toggle or action and run it
+	----------------------------------------------------------------------------
+
+	local Spotlight = { Open = false }
+
+	local function EntryValue(entry)
+		if entry.Kind == "Tab" then
+			return "Open"
+		end
+		local element = entry.Element
+		if not element or element.Type == "Paragraph" or element.Type == "Code" or element.Type == "Image" then
+			return nil
+		elseif element.Type == "Button" then
+			return entry.Row.Disabled and nil or "Run"
+		end
+		local ok, text = pcall(element.GetText, element)
+		return ok and text or nil
+	end
+
+	local function CollectEntries()
+		local entries = {}
+		for tabIndex, tab in ipairs(Window.Tabs) do
+			table.insert(entries, {
+				Kind = "Tab",
+				Tab = tab,
+				Title = tab.Title,
+				Subtitle = tab.Description and tostring(tab.Description) or "Page",
+				TitleLower = tab.Title:lower(),
+				Search = (tab.Title .. " " .. tostring(tab.Description or "")):lower(),
+				Order = tabIndex * 10000,
+			})
+			for rowIndex, row in ipairs(tab.Rows) do
+				if row.Title ~= "" and row:_IsShown() and not row.Destroyed then
+					local section = row.Group.Block and row.Group.Block.Title
+					table.insert(entries, {
+						Kind = "Row",
+						Row = row,
+						Element = row.Element,
+						Tab = tab,
+						Title = row.Title,
+						Subtitle = (section and section ~= "") and (tab.Title .. " › " .. section) or tab.Title,
+						TitleLower = row.Title:lower(),
+						Search = (row.Description .. " " .. row.Keywords .. " " .. tab.Title .. " " .. (section or "")):lower(),
+						Order = tabIndex * 10000 + rowIndex,
+					})
+				end
+			end
+		end
+		return entries
+	end
+
+	local function Fuzzy(haystack, needle)
+		local position = 1
+		for i = 1, #needle do
+			local found = haystack:find(needle:sub(i, i), position, true)
+			if not found then
+				return false
+			end
+			position = found + 1
+		end
+		return true
+	end
+
+	local function Score(entry, query)
+		local title = entry.TitleLower
+		if title == query then
+			return 100
+		elseif title:sub(1, #query) == query then
+			return 90
+		end
+		local start = title:find(query, 1, true)
+		if start then
+			return title:sub(start - 1, start - 1):match("[%s%p]") and 80 or 70
+		elseif entry.Search:find(query, 1, true) then
+			return 50
+		elseif #query >= 2 and Fuzzy(title, query) then
+			return 30
+		end
+		return 0
+	end
+
+	local function SpotlightSearch(text)
+		local query = text:lower():gsub("^%s+", ""):gsub("%s+$", "")
+		local results = {}
+		for _, entry in ipairs(CollectEntries()) do
+			if query == "" then
+				if entry.Kind == "Tab" then
+					entry.Score = 1
+					table.insert(results, entry)
+				end
+			else
+				local score = Score(entry, query)
+				if score > 0 then
+					entry.Score = score
+					table.insert(results, entry)
+				end
+			end
+		end
+		table.sort(results, function(a, b)
+			if a.Score ~= b.Score then
+				return a.Score > b.Score
+			elseif (a.Kind == "Tab") ~= (b.Kind == "Tab") then
+				return a.Kind == "Tab" -- pages first on a tie
+			end
+			return a.Order < b.Order
+		end)
+		while #results > 40 do
+			table.remove(results)
+		end
+		return results
+	end
+
+	function Window:OpenSpotlight()
+		if Spotlight.Open or MacUI.Unloaded or config.Spotlight == false then
+			return
+		end
+		if Window.Minimized then
+			Window:Restore()
+		end
+		Window:_ClosePopup(true)
+		HideTooltip()
+		Spotlight.Open = true
+		local scale = Window.Scale
+		local width, searchHeight, itemHeight, maxVisible = 580, 54, 46, 7
+		local results, items, selected = {}, {}, 1
+		local connections = {}
+
+		local overlay = New("TextButton", {
+			Name = "Spotlight",
+			Size = UDim2.fromScale(1, 1),
+			ZIndex = 300,
+			Parent = PopupLayer,
+		})
+		-- centred over the window, just under its toolbar, kept on screen
+		local screen = PopupLayer.AbsoluteSize
+		local rootPosition = Root.AbsolutePosition - PopupLayer.AbsolutePosition
+		local rootSize = Root.AbsoluteSize
+		local half = width * scale / 2
+		local centerX = math.clamp(rootPosition.X + rootSize.X / 2, half + 8, math.max(half + 8, screen.X - half - 8))
+		local top = math.clamp(rootPosition.Y + 44 * RootScale.Scale, 8, math.max(8, screen.Y - (searchHeight + 7 * itemHeight + 20) * scale))
+		local holder = New("Frame", {
+			Name = "Panel",
+			BackgroundTransparency = 1,
+			AnchorPoint = Vector2.new(0.5, 0),
+			Position = UDim2.fromOffset(centerX, top),
+			Size = UDim2.fromOffset(width, searchHeight),
+			ZIndex = 301,
+			Parent = overlay,
+		})
+		local panelScale = New("UIScale", { Scale = scale * 0.96, Parent = holder })
+		local sink = New("TextButton", { Name = "Sink", Size = UDim2.fromScale(1, 1), ZIndex = 1, Parent = holder })
+		local shadow = Shadow(holder, 40, function(t)
+			return Spotlight.Open and t.ShadowTransparency or 1
+		end)
+		shadow.ImageTransparency = 1
+		local panel = New("CanvasGroup", {
+			Name = "Content",
+			Size = UDim2.fromScale(1, 1),
+			GroupTransparency = 1,
+			ZIndex = 2,
+			Theme = { BackgroundColor3 = "Menu" },
+			Parent = holder,
+		})
+		Corner(panel, 16)
+		local border = New("Frame", {
+			BackgroundTransparency = 1,
+			Position = UDim2.fromOffset(1, 1),
+			Size = UDim2.new(1, -2, 1, -2),
+			ZIndex = 50,
+			Parent = panel,
+		})
+		Corner(border, 15)
+		Stroke(border, "MenuStroke", 1, 0.1)
+		IconImage({
+			Icon = "search",
+			IconSize = 20,
+			AnchorPoint = Vector2.new(0, 0.5),
+			Position = UDim2.new(0, 18, 0, searchHeight / 2),
+			Theme = { ImageColor3 = "SubText" },
+			Parent = panel,
+		})
+		local box = New("TextBox", {
+			Name = "Query",
+			Text = "",
+			PlaceholderText = "Search settings and actions",
+			TextSize = 19,
+			Position = UDim2.fromOffset(50, 0),
+			Size = UDim2.new(1, -110, 0, searchHeight),
+			ClipsDescendants = true,
+			Theme = { TextColor3 = "Text", PlaceholderColor3 = "Tertiary" },
+			Parent = panel,
+		})
+		local escHint = New("TextLabel", {
+			Text = "esc",
+			TextSize = 11,
+			Weight = Enum.FontWeight.Medium,
+			AnchorPoint = Vector2.new(1, 0.5),
+			Position = UDim2.new(1, -16, 0, searchHeight / 2),
+			Size = UDim2.fromOffset(32, 18),
+			TextXAlignment = Enum.TextXAlignment.Center,
+			BackgroundTransparency = 0,
+			Theme = { BackgroundColor3 = "Control", TextColor3 = "SubText" },
+			Parent = panel,
+		})
+		Corner(escHint, 5)
+		local divider = New("Frame", {
+			Name = "Divider",
+			Position = UDim2.fromOffset(0, searchHeight),
+			Size = UDim2.new(1, 0, 0, 1),
+			Visible = false,
+			Theme = { BackgroundColor3 = "Separator" },
+			Parent = panel,
+		})
+		local list = New("ScrollingFrame", {
+			Name = "Results",
+			Position = UDim2.fromOffset(0, searchHeight + 1),
+			Size = UDim2.new(1, 0, 1, -(searchHeight + 1)),
+			CanvasSize = UDim2.new(),
+			AutomaticCanvasSize = Enum.AutomaticSize.Y,
+			ScrollingDirection = Enum.ScrollingDirection.Y,
+			ScrollBarThickness = 3,
+			ScrollBarImageTransparency = 0.4,
+			VerticalScrollBarInset = Enum.ScrollBarInset.None,
+			Theme = { ScrollBarImageColor3 = "Scrollbar" },
+			Parent = panel,
+		})
+		local listContent = New("Frame", {
+			BackgroundTransparency = 1,
+			Size = UDim2.new(1, 0, 0, 0),
+			AutomaticSize = Enum.AutomaticSize.Y,
+			Parent = list,
+		})
+		Padding(listContent, 6, 8, 6, 8)
+		List(listContent, nil, 0)
+		local empty = New("TextLabel", {
+			Name = "Empty",
+			Text = "No Results",
+			TextSize = 13,
+			Size = UDim2.new(1, 0, 0, 40),
+			TextXAlignment = Enum.TextXAlignment.Center,
+			Visible = false,
+			LayoutOrder = 100000,
+			Theme = { TextColor3 = "Tertiary" },
+			Parent = listContent,
+		})
+
+		local function Close()
+			if not Spotlight.Open then
+				return
+			end
+			Spotlight.Open = false
+			Spotlight.Close = nil
+			for _, connection in ipairs(connections) do
+				connection:Disconnect()
+			end
+			if box:IsFocused() then
+				box:ReleaseFocus()
+			end
+			Restyle(shadow, 0.15)
+			Tween(panel, { GroupTransparency = 1 }, 0.15)
+			Tween(panelScale, { Scale = scale * 0.97 }, 0.15)
+			task.delay(0.16, function()
+				overlay:Destroy()
+			end)
+		end
+		Spotlight.Close = Close
+
+		local function Activate(entry, reveal)
+			Close()
+			if entry.Kind == "Tab" then
+				Window:SelectTab(entry.Tab)
+				return
+			end
+			local element = entry.Element
+			if not reveal and not entry.Row.Disabled and element and element._Activate then
+				element:_Activate(true)
+			else
+				Window:Reveal(entry.Row)
+			end
+		end
+
+		local function Paint()
+			for index, item in ipairs(items) do
+				item.Selected = index == selected
+				for _, object in ipairs(item.Painted) do
+					Restyle(object, 0.08)
+				end
+			end
+			local top = (selected - 1) * itemHeight
+			local visibleHeight = math.min(#results, maxVisible) * itemHeight
+			local current = list.CanvasPosition.Y
+			if top < current then
+				list.CanvasPosition = Vector2.new(0, top)
+			elseif top + itemHeight > current + visibleHeight then
+				list.CanvasPosition = Vector2.new(0, top + itemHeight - visibleHeight)
+			end
+		end
+
+		local function Render()
+			for _, item in ipairs(items) do
+				item.Button:Destroy()
+			end
+			table.clear(items)
+			results = SpotlightSearch(box.Text)
+			selected = math.clamp(selected, 1, math.max(#results, 1))
+			for index, entry in ipairs(results) do
+				local item = { Entry = entry, Selected = false }
+				local function Foreground(normal)
+					return function(t)
+						return item.Selected and t.SelectionText or t[normal]
+					end
+				end
+				item.Button = New("TextButton", {
+					Name = "Result",
+					Size = UDim2.new(1, 0, 0, itemHeight),
+					LayoutOrder = index,
+					Theme = {
+						BackgroundColor3 = "Accent",
+						BackgroundTransparency = function()
+							return item.Selected and 0 or 1
+						end,
+					},
+					Parent = listContent,
+				})
+				Corner(item.Button, 9)
+				local tab = entry.Tab
+				IconTile(item.Button, tab.Icon or "layers", tab.TileColor, 28, 7, 16, {
+					AnchorPoint = Vector2.new(0, 0.5),
+					Position = UDim2.new(0, 10, 0.5, 0),
+				})
+				local value = EntryValue(entry)
+				local reserve = value and 150 or 60
+				local title = New("TextLabel", {
+					Text = entry.Title,
+					TextSize = 14,
+					Weight = Enum.FontWeight.Medium,
+					Position = UDim2.fromOffset(50, 6),
+					Size = UDim2.new(1, -reserve, 0, 18),
+					TextTruncate = Enum.TextTruncate.AtEnd,
+					Theme = { TextColor3 = Foreground("Text") },
+					Parent = item.Button,
+				})
+				local subtitle = New("TextLabel", {
+					Text = entry.Subtitle,
+					TextSize = 12,
+					Position = UDim2.fromOffset(50, 24),
+					Size = UDim2.new(1, -reserve, 0, 15),
+					TextTruncate = Enum.TextTruncate.AtEnd,
+					Theme = { TextColor3 = Foreground("SubText") },
+					Parent = item.Button,
+				})
+				item.Painted = { item.Button, title, subtitle }
+				if value then
+					table.insert(item.Painted, New("TextLabel", {
+						Text = value,
+						TextSize = 13,
+						AnchorPoint = Vector2.new(1, 0.5),
+						Position = UDim2.new(1, -14, 0.5, 0),
+						Size = UDim2.fromOffset(110, 18),
+						TextXAlignment = Enum.TextXAlignment.Right,
+						TextTruncate = Enum.TextTruncate.AtEnd,
+						Theme = { TextColor3 = Foreground("SubText") },
+						Parent = item.Button,
+					}))
+				end
+				item.Button.MouseEnter:Connect(function()
+					if selected ~= index then
+						selected = index
+						Paint()
+					end
+				end)
+				item.Button.MouseButton1Click:Connect(function()
+					Activate(entry, false)
+				end)
+				table.insert(items, item)
+			end
+			empty.Visible = #results == 0 and box.Text ~= ""
+			divider.Visible = #results > 0 or empty.Visible
+			local listHeight = #results > 0 and (math.min(#results, maxVisible) * itemHeight + 12) or (empty.Visible and 52 or 0)
+			Tween(holder, { Size = UDim2.fromOffset(width, searchHeight + (listHeight > 0 and listHeight + 1 or 0)) }, 0.18)
+			Paint()
+		end
+
+		table.insert(connections, UserInputService.InputBegan:Connect(function(input)
+			if input.KeyCode == Enum.KeyCode.Down then
+				selected = math.min(selected + 1, math.max(#results, 1))
+				Paint()
+			elseif input.KeyCode == Enum.KeyCode.Up then
+				selected = math.max(selected - 1, 1)
+				Paint()
+			end
+		end))
+		box:GetPropertyChangedSignal("Text"):Connect(function()
+			selected = 1
+			Render()
+		end)
+		box.FocusLost:Connect(function(enterPressed, input)
+			if not Spotlight.Open then
+				return
+			end
+			if enterPressed then
+				local entry = results[selected]
+				if entry then
+					local reveal = UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) or UserInputService:IsKeyDown(Enum.KeyCode.RightShift)
+					Activate(entry, reveal)
+				else
+					Close()
+				end
+			elseif input and input.KeyCode == Enum.KeyCode.Escape then
+				Close()
+			end
+		end)
+		sink.MouseButton1Click:Connect(function()
+			box:CaptureFocus()
+		end)
+		overlay.MouseButton1Click:Connect(Close)
+		overlay.MouseButton2Click:Connect(Close)
+
+		Render()
+		Tween(panel, { GroupTransparency = 0 }, 0.16)
+		Tween(panelScale, { Scale = scale }, 0.28, Enum.EasingStyle.Back)
+		Restyle(shadow, 0.2)
+		task.defer(function()
+			if Spotlight.Open then
+				box:CaptureFocus()
+			end
+		end)
+	end
+
+	function Window:CloseSpotlight()
+		if Spotlight.Close then
+			Spotlight.Close()
+		end
+	end
+
+	SpotlightHint.MouseButton1Click:Connect(function()
+		Window:OpenSpotlight()
+	end)
+
+	----------------------------------------------------------------------------
+	-- Shortcut list: a floating panel with every keybind and bound shortcut
+	----------------------------------------------------------------------------
+
+	local ShortcutPanel
+	local shortcutRefreshQueued = false
+
+	local function RefreshShortcutList()
+		if not ShortcutPanel then
+			return
+		end
+		local entries = {}
+		local seen = {}
+		local titleCount = {}
+		for _, tab in ipairs(Window.Tabs) do
+			for _, row in ipairs(tab.Rows) do
+				titleCount[row.Title] = (titleCount[row.Title] or 0) + 1
+			end
+		end
+		local function Label(element, fallback)
+			local title = tostring(element.Title or element.Idx or fallback)
+			local block = element.Row and element.Row.Group and element.Row.Group.Block
+			if (titleCount[title] or 0) > 1 and block and block.Title and block.Title ~= "" then
+				return block.Title .. " · " .. title
+			end
+			return title
+		end
+		local function Add(element)
+			if seen[element] then
+				return
+			end
+			seen[element] = true
+			if element.Type == "Keybind" and element.Value ~= "None" then
+				local ok, active = pcall(element.GetState, element)
+				table.insert(entries, { Title = Label(element, "Keybind"), Key = KeyName(element.Value), Active = ok and active == true })
+			elseif element.Shortcut then
+				table.insert(entries, {
+					Title = Label(element, "Shortcut"),
+					Key = KeyName(element.Shortcut),
+					Active = element.Type == "Toggle" and element.Value == true,
+				})
+			end
+		end
+		for _, option in pairs(MacUI.Options) do
+			if type(option) == "table" and option.Type then
+				Add(option)
+			end
+		end
+		for _, tab in ipairs(Window.Tabs) do
+			for _, row in ipairs(tab.Rows) do
+				if row.Element then
+					Add(row.Element)
+				end
+			end
+		end
+		table.sort(entries, function(a, b)
+			return a.Title < b.Title
+		end)
+		for _, child in ipairs(ShortcutPanel.Rows:GetChildren()) do
+			if child:IsA("GuiObject") then
+				child:Destroy()
+			end
+		end
+		for index, entry in ipairs(entries) do
+			local line = New("Frame", {
+				Name = "Shortcut",
+				BackgroundTransparency = 1,
+				Size = UDim2.new(1, 0, 0, 24),
+				LayoutOrder = index,
+				Parent = ShortcutPanel.Rows,
+			})
+			New("TextLabel", {
+				Text = entry.Title,
+				TextSize = 13,
+				Size = UDim2.new(1, -70, 1, 0),
+				TextTruncate = Enum.TextTruncate.AtEnd,
+				Theme = { TextColor3 = entry.Active and "Text" or "SubText" },
+				Parent = line,
+			})
+			local cap = New("TextLabel", {
+				Text = entry.Key,
+				TextSize = 11,
+				Weight = Enum.FontWeight.Medium,
+				AnchorPoint = Vector2.new(1, 0.5),
+				Position = UDim2.new(1, 0, 0.5, 0),
+				Size = UDim2.fromOffset(0, 18),
+				AutomaticSize = Enum.AutomaticSize.X,
+				TextXAlignment = Enum.TextXAlignment.Center,
+				BackgroundTransparency = 0,
+				Theme = {
+					BackgroundColor3 = entry.Active and "Accent" or "Control",
+					TextColor3 = entry.Active and "SelectionText" or "SubText",
+				},
+				Parent = line,
+			})
+			Corner(cap, 5)
+			Padding(cap, 0, 7, 0, 7)
+		end
+		if #entries == 0 then
+			New("TextLabel", {
+				Name = "Empty",
+				Text = "Right-click a toggle to add one",
+				TextSize = 12,
+				Size = UDim2.new(1, 0, 0, 24),
+				Theme = { TextColor3 = "Tertiary" },
+				Parent = ShortcutPanel.Rows,
+			})
+		end
+		ShortcutPanel.Holder.Size = UDim2.fromOffset(230, 38 + math.max(#entries, 1) * 26 + 8)
+	end
+
+	local function QueueShortcutRefresh()
+		if shortcutRefreshQueued or not Window.KeybindListVisible then
+			return
+		end
+		shortcutRefreshQueued = true
+		task.defer(function()
+			shortcutRefreshQueued = false
+			RefreshShortcutList()
+		end)
+	end
+
+	function Window:SetKeybindList(visible)
+		visible = visible == true
+		Window.KeybindListVisible = visible
+		if visible and not ShortcutPanel then
+			local holder = New("Frame", {
+				Name = "ShortcutList",
+				BackgroundTransparency = 1,
+				Position = UDim2.fromOffset(14, 14),
+				Size = UDim2.fromOffset(230, 72),
+				ZIndex = 4,
+				Parent = ScreenGui,
+			})
+			local listScale = New("UIScale", { Scale = Window.Scale, Parent = holder })
+			Shadow(holder, 18)
+			local body = New("Frame", {
+				Name = "Body",
+				Size = UDim2.fromScale(1, 1),
+				BackgroundTransparency = 0.03,
+				ZIndex = 2,
+				Active = true,
+				Theme = { BackgroundColor3 = "Menu" },
+				Parent = holder,
+			})
+			Corner(body, 12)
+			Stroke(body, "MenuStroke", 1, 0.1)
+			local header = New("Frame", {
+				Name = "Header",
+				BackgroundTransparency = 1,
+				Size = UDim2.new(1, 0, 0, 36),
+				Parent = body,
+			})
+			IconImage({
+				Icon = "keyboard",
+				IconSize = 15,
+				AnchorPoint = Vector2.new(0, 0.5),
+				Position = UDim2.new(0, 12, 0.5, 0),
+				Theme = { ImageColor3 = "Accent" },
+				Parent = header,
+			})
+			New("TextLabel", {
+				Text = "Shortcuts",
+				TextSize = 13,
+				Weight = Enum.FontWeight.Bold,
+				Position = UDim2.fromOffset(34, 0),
+				Size = UDim2.new(1, -44, 1, 0),
+				Theme = { TextColor3 = "Text" },
+				Parent = header,
+			})
+			local rows = New("Frame", {
+				Name = "Rows",
+				BackgroundTransparency = 1,
+				Position = UDim2.fromOffset(0, 36),
+				Size = UDim2.new(1, 0, 1, -36),
+				Parent = body,
+			})
+			Padding(rows, 0, 12, 8, 12)
+			List(rows, nil, 2)
+			ShortcutPanel = { Holder = holder, Rows = rows, Scale = listScale }
+
+			local dragging
+			header.InputBegan:Connect(function(input)
+				if IsPointer(input) then
+					dragging = { Start = input.Position, Position = holder.Position }
+				end
+			end)
+			Connect(UserInputService.InputChanged, function(input)
+				if dragging and IsMove(input) then
+					local delta = input.Position - dragging.Start
+					holder.Position = dragging.Position + UDim2.fromOffset(delta.X, delta.Y)
+				end
+			end)
+			Connect(UserInputService.InputEnded, function(input)
+				if IsPointer(input) then
+					dragging = nil
+				end
+			end)
+			Connect(ShortcutsChanged, QueueShortcutRefresh)
+			Connect(MacUI.OptionChanged, QueueShortcutRefresh)
+		end
+		if ShortcutPanel then
+			ShortcutPanel.Holder.Visible = visible
+		end
+		if visible then
+			RefreshShortcutList()
+		end
+	end
+
+	function Window:_OnScale(scale)
+		if ShortcutPanel then
+			ShortcutPanel.Scale.Scale = scale
+		end
+		HideTooltip()
+	end
+
 	Connect(UserInputService.InputBegan, function(input, processed)
-		if processed or KeyCapture.Active or UserInputService:GetFocusedTextBox() then
+		if KeyCapture.Active or UserInputService:GetFocusedTextBox() then
+			return
+		end
+		if config.Spotlight ~= false and input.KeyCode == (config.SpotlightKey or Enum.KeyCode.K) then
+			-- Ctrl, or Command on a Mac (reported as Super or Meta)
+			local modifier = UserInputService:IsKeyDown(Enum.KeyCode.LeftControl)
+				or UserInputService:IsKeyDown(Enum.KeyCode.RightControl)
+				or UserInputService:IsKeyDown(Enum.KeyCode.LeftSuper)
+				or UserInputService:IsKeyDown(Enum.KeyCode.RightSuper)
+				or UserInputService:IsKeyDown(Enum.KeyCode.LeftMeta)
+				or UserInputService:IsKeyDown(Enum.KeyCode.RightMeta)
+			if modifier then
+				if Spotlight.Open then
+					Window:CloseSpotlight()
+				else
+					Window:OpenSpotlight()
+				end
+				return
+			end
+		end
+		if processed then
 			return
 		end
 		if Window.MinimizeKey and input.KeyCode == Window.MinimizeKey then
@@ -4729,8 +7316,21 @@ function MacUI:CreateWindow(config)
 		MacUI:Destroy()
 	end
 
+	function Window:_Cleanup()
+		Window:CloseSpotlight()
+		for _, fn in ipairs(Cleanup) do
+			SafeCall(fn)
+		end
+	end
+
 	UpdateNavigation()
 	Window:SetVisible(true)
+	if config.Acrylic then
+		Window:SetAcrylic(true)
+	end
+	if config.KeybindList then
+		Window:SetKeybindList(true)
+	end
 	return Window
 end
 
@@ -4749,6 +7349,9 @@ function MacUI:Destroy()
 	for _, window in ipairs(self.Windows) do
 		if window._ClosePopup then
 			window:_ClosePopup(true)
+		end
+		if window._Cleanup then
+			SafeCall(window._Cleanup, window)
 		end
 		for _, connection in ipairs(window.Connections) do
 			connection:Disconnect()

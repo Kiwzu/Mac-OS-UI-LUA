@@ -1,6 +1,13 @@
 --[[
 	MacUI — full demo
 	Every component in one window. Paste into your executor.
+
+	Once it's open:
+	  • Ctrl + K (Cmd + K on Mac) opens Spotlight: type to find any setting,
+	    press Enter to flip a toggle or run a button.
+	  • Right-click any row to reset it, copy its value or give it a
+	    keyboard shortcut.
+	  • Right Ctrl hides and shows the window.
 ]]
 
 local BASE = "https://raw.githubusercontent.com/Kiwzu/Mac-OS-UI-LUA/refs/heads/main/"
@@ -20,22 +27,59 @@ local Window = MacUI:CreateWindow({
 	Title = "MacUI Hub",
 	SubTitle = "Sonoma Edition",
 	Icon = "command", -- any Lucide icon name or rbxassetid://
-	Size = UDim2.fromOffset(780, 540),
+	Size = UDim2.fromOffset(800, 560),
 	Theme = "Dark", -- "Dark" | "Light" | "Midnight"
 	Accent = "Blue", -- macOS accent name or a Color3
 	SidebarStyle = "Tile", -- "Tile" (System Settings) | "Tinted" | "Plain"
 	Profile = true, -- avatar + name at the top of the sidebar
 	MinimizeKey = Enum.KeyCode.RightControl,
+	Acrylic = false, -- frosted-glass sidebar (users can switch it on in Appearance)
 })
 
+-- A description turns the top of a page into a System Settings-style header.
 local Tabs = {
-	General = Window:AddTab({ Title = "General", Icon = "layers", Section = "Main" }),
-	Combat = Window:AddTab({ Title = "Combat", Icon = "swords" }),
-	Player = Window:AddTab({ Title = "Player", Icon = "user" }),
-	Visuals = Window:AddTab({ Title = "Visuals", Icon = "eye" }),
-	Teleport = Window:AddTab({ Title = "Teleport", Icon = "map-pin" }),
-	Appearance = Window:AddTab({ Title = "Appearance", Icon = "palette", Section = "Settings" }),
-	Profiles = Window:AddTab({ Title = "Profiles", Icon = "folder" }),
+	General = Window:AddTab({
+		Title = "General",
+		Icon = "layers",
+		Section = "Main",
+		Description = "Farm automatically, follow your quest and run quick actions.",
+	}),
+	Combat = Window:AddTab({
+		Title = "Combat",
+		Icon = "swords",
+		Description = "Choose how targets are picked and when combat kicks in.",
+	}),
+	Player = Window:AddTab({
+		Title = "Player",
+		Icon = "user",
+		Description = "Movement and identity settings for your character.",
+	}),
+	Visuals = Window:AddTab({
+		Title = "Visuals",
+		Icon = "eye",
+		Description = "Highlight players and tune what you see.",
+	}),
+	Teleport = Window:AddTab({
+		Title = "Teleport",
+		Icon = "map-pin",
+		Description = "Travel to any location or player in one click.",
+	}),
+	Appearance = Window:AddTab({
+		Title = "Appearance",
+		Icon = "palette",
+		Section = "Settings",
+		Description = "Theme, accent colour, frosted glass, size and shortcuts.",
+	}),
+	Profiles = Window:AddTab({
+		Title = "Profiles",
+		Icon = "folder",
+		Description = "Save your setup and load it automatically next time.",
+	}),
+	About = Window:AddTab({
+		Title = "About",
+		Icon = "info",
+		Description = "What MacUI can do and how to load it.",
+	}),
 }
 
 --------------------------------------------------------------------------------
@@ -69,6 +113,8 @@ Overview:AddToggle("AutoFarm", {
 	Title = "Enabled",
 	Description = "Farm automatically whenever it is safe.",
 	Default = false,
+	Shortcut = "G", -- press G anywhere to flip it (right-click the row to change)
+	Tooltip = "Pauses by itself while you're in a menu.",
 	Callback = function(enabled)
 		Status:SetValue(enabled and "Fighting: Training Dummy" or "Idle")
 		if enabled then
@@ -97,19 +143,39 @@ Overview:AddDropdown("Targets", {
 	Default = { "Training Dummy" },
 })
 
+Overview:AddStepper("FarmRadius", {
+	Title = "Search radius",
+	Description = "How far to look for enemies.",
+	Min = 20,
+	Max = 300,
+	Step = 20,
+	Default = 100,
+	Suffix = " studs",
+})
+
 local Actions = Tabs.General:AddSection({ Title = "Actions", Icon = "mouse-pointer-2" })
 
 Actions:AddButton({
 	Title = "Show notification",
-	Description = "A macOS-style banner in the top-right corner.",
+	Description = "A macOS-style banner with action buttons.",
 	ButtonText = "Show",
 	Callback = function()
 		MacUI:Notify({
-			Title = "MacUI",
-			SubContent = "Notifications",
-			Content = "This is what a notification banner looks like.",
-			Icon = "bell",
-			Duration = 5,
+			Title = "Quest complete",
+			SubContent = "Blessed Maiden",
+			Content = "Your reward is waiting. Open the Appearance page to try another theme?",
+			Icon = "trophy",
+			IconColor = "Yellow",
+			Duration = 8,
+			Buttons = {
+				{
+					Title = "Open",
+					Callback = function()
+						Window:SelectTab(Tabs.Appearance)
+					end,
+				},
+				{ Title = "Later" },
+			},
 		})
 	end,
 })
@@ -135,6 +201,39 @@ Actions:AddButton({
 	end,
 })
 
+Actions:AddButton({
+	Title = "Rename window",
+	Description = "A dialog that asks for text.",
+	Callback = function()
+		Window:Dialog({
+			Title = "Rename window",
+			Content = "Choose a new title for this window.",
+			Icon = "pencil",
+			Input = { Placeholder = "Title", Default = Window.Title },
+			Buttons = {
+				{
+					Title = "Rename",
+					Callback = function(text)
+						if text and text:gsub("%s", "") ~= "" then
+							Window:SetTitle(text)
+						end
+					end,
+				},
+				{ Title = "Cancel" },
+			},
+		})
+	end,
+})
+
+Actions:AddButton({
+	Title = "Open Spotlight",
+	Description = "Or press Ctrl + K anywhere.",
+	ButtonText = "Search",
+	Callback = function()
+		Window:OpenSpotlight()
+	end,
+})
+
 --------------------------------------------------------------------------------
 -- Combat
 --------------------------------------------------------------------------------
@@ -149,6 +248,13 @@ Aim:AddSegmented("TargetPart", {
 	Title = "Target part",
 	Values = { "Head", "Torso", "Random" },
 	Default = "Torso",
+})
+
+Aim:AddRadio("TargetPriority", {
+	Title = "Priority",
+	Description = "Which target wins when several are in range.",
+	Values = { "Closest to cursor", "Lowest health", "Nearest" },
+	Default = "Closest to cursor",
 })
 
 Aim:AddSlider("FieldOfView", {
@@ -166,6 +272,7 @@ Aim:AddSlider("Smoothness", {
 	Max = 1,
 	Default = 0.35,
 	Rounding = 2,
+	Tooltip = "0 snaps instantly, 1 moves slowest.",
 })
 
 Aim:AddKeybind("CombatKey", {
@@ -182,6 +289,12 @@ local Filters = Tabs.Combat:AddSection({ Title = "Filters" })
 Filters:AddCheckbox("IgnoreFriends", { Title = "Ignore friends", Default = true })
 Filters:AddCheckbox("IgnoreTeam", { Title = "Ignore teammates", Default = true })
 Filters:AddCheckbox("VisibleOnly", { Title = "Visible targets only", Default = false })
+Filters:AddStepper("MaxTargets", {
+	Title = "Targets at once",
+	Min = 1,
+	Max = 8,
+	Default = 3,
+})
 
 --------------------------------------------------------------------------------
 -- Player
@@ -256,15 +369,27 @@ local Esp = Tabs.Visuals:AddSection({
 	Icon = "eye",
 })
 Esp:AddToggle("EspEnabled", { Title = "Enabled", Default = true })
+-- DependsOn greys a row out until the flag is on (DependsMode = "Hide" hides it instead).
 Esp:AddColorpicker("EspColor", {
 	Title = "Fill colour",
 	Default = Color3.fromRGB(10, 132, 255),
 	Transparency = 0.5,
+	DependsOn = "EspEnabled",
 })
 Esp:AddDropdown("EspStyle", {
 	Title = "Style",
 	Values = { "Outline", "Fill", "Outline + Fill" },
 	Default = "Outline + Fill",
+	DependsOn = "EspEnabled",
+})
+Esp:AddSlider("EspDistance", {
+	Title = "Max distance",
+	Min = 50,
+	Max = 2000,
+	Default = 800,
+	Increment = 50,
+	Suffix = " studs",
+	DependsOn = "EspEnabled",
 })
 
 --------------------------------------------------------------------------------
@@ -283,6 +408,23 @@ for _, place in ipairs({ "Spawn", "Shop", "Arena", "Secret Island" }) do
 end
 Tabs.Teleport:SetBadge(4)
 
+local People = Tabs.Teleport:AddSection({ Title = "Players", Icon = "users" })
+-- Values = "Players" keeps the list in sync as people join and leave.
+People:AddDropdown("TeleportTarget", {
+	Title = "Player",
+	Values = "Players",
+	Searchable = true,
+})
+People:AddButton({
+	Title = "Go to player",
+	ButtonText = "Teleport",
+	Style = "Primary",
+	DependsOn = "TeleportTarget", -- enabled once a player is picked
+	Callback = function()
+		MacUI:Notify({ Title = "Teleport", Content = "Travelling to " .. tostring(Options.TeleportTarget.Value) .. "…", Icon = "users" })
+	end,
+})
+
 --------------------------------------------------------------------------------
 -- Settings
 --------------------------------------------------------------------------------
@@ -296,10 +438,30 @@ SaveManager:SetFolder("MacUI/ExampleHub/" .. tostring(game.PlaceId))
 SaveManager:IgnoreThemeSettings()
 SaveManager:BuildConfigSection(Tabs.Profiles)
 
-Window:SelectTab(1)
+--------------------------------------------------------------------------------
+-- About
+--------------------------------------------------------------------------------
+
+local Tips = Tabs.About:AddSection({ Title = "Tips", Icon = "sparkles" })
+Tips:AddParagraph({
+	Title = "Spotlight",
+	Content = "Press <b>Ctrl + K</b> to search every setting in this window. Enter flips a toggle or runs a button; Shift + Enter just shows it.",
+})
+Tips:AddParagraph({
+	Title = "Right-click menus",
+	Content = "Right-click (or long-press) any row to reset it, copy its value or assign a keyboard shortcut.",
+})
+
+local Loader = Tabs.About:AddSection({ Title = "Load MacUI" })
+Loader:AddCode({
+	Title = "Loader",
+	Description = "Paste this at the top of your own script.",
+	Code = 'local MacUI = loadstring(game:HttpGet("' .. BASE .. 'MacUIFramework.lua"))()',
+})
+
 MacUI:Notify({
 	Title = "MacUI loaded",
-	Content = "Press Right Ctrl to hide or show the window.",
+	Content = "Press Ctrl + K to search, Right Ctrl to hide the window.",
 	Icon = "command",
 	Duration = 6,
 })
