@@ -235,7 +235,8 @@ Section:AddImage({ Title = "Map", Image = "rbxassetid://…", Height = 150, Scal
 local Fps = Section:AddGraph("Fps", { Title = "Frame rate", Points = 40, Min = 0, Suffix = " fps", Height = 76 })
 Fps:Push(60)                                -- also :SetValues(list), :Clear(), :SetRange(min, max)
 
--- Table: click a header to sort, click a row to select it
+-- Table: click a header to sort (again to reverse, a third time for the original order), click a row to select it.
+-- Numbers, and text that is a number, sort by value.
 local Players = Section:AddTable("Players", {
     Title = "Players",
     Columns = { "Name", { Title = "Level", Align = "Right", Width = 0.5 } },  -- Width: share of the row (default 1)
@@ -244,7 +245,8 @@ local Players = Section:AddTable("Players", {
     Callback = function(row, index) end,
 })
 Players:AddRow({ "Guest", 1 })              -- also :SetRows(list), :RemoveRow(row or index), :Clear(),
-                                            -- :SortBy(column, descending), :Select(row or index), :GetSelected()
+                                            -- :SortBy(column, descending) (nil for the original order),
+                                            -- :Select(index or row), :GetSelected() -> row, index
 
 -- Macro: records what the user changes and presses, then plays it back (see Automation)
 local Routine = Section:AddMacro("Routine", { Title = "Boss rotation", Loop = false, Speed = 1 })
@@ -393,8 +395,8 @@ MacUI:SetFont("GothamSSm")                  -- any font family name, rbxasset pa
 MacUI:SetReduceMotion(true)                 -- no animations
 MacUI.ThemeChanged:Connect(function(name) end)
 
--- your own theme: start from an existing one and override any colour token
-MacUI:AddTheme("Ocean", { Background = Color3.fromRGB(12, 30, 48), Sidebar = Color3.fromRGB(16, 38, 60) }, "Dark")
+-- your own theme: start from an existing one and override any colour token (a Color3 or a hex string)
+MacUI:AddTheme("Ocean", { Background = Color3.fromRGB(12, 30, 48), Sidebar = "#10263c" }, "Dark")
 MacUI:SetTheme("Ocean")
 MacUI:RemoveTheme("Ocean")                  -- the built-in themes stay
 MacUI:PreviewTheme({ Background = Color3.new(0, 0, 0) })   -- try colours without saving; SetTheme(MacUI.ThemeName) goes back
@@ -420,15 +422,16 @@ SaveManager:SetLibrary(MacUI)
 SaveManager:SetFolder("MyHub/" .. game.PlaceId)
 SaveManager:IgnoreThemeSettings()
 SaveManager:BuildConfigSection(SettingsTab)
--- create/load/overwrite profiles, autoload, "Save changes automatically",
+-- create/load/overwrite/delete profiles, autoload, "Save changes automatically",
 -- and Share / Import buttons that copy and paste a profile code
 SaveManager:LoadAutoloadConfig()
 
+local ok, name = SaveManager:Save("Farming")      -- name: cleaned up to work as a file name
 local code = SaveManager:ExportConfig()          -- the current settings as text
 local ok, reason = SaveManager:ImportConfig(code)
 ```
 
-Profiles also store toggle and button shortcuts, steppers, radio groups and recorded macros.
+Profiles also store toggle and button shortcuts, steppers, radio groups and recorded macros. A saved value only goes back into the same kind of control, so a profile from an older version of your script can't break a control you've since changed, and a file error is reported instead of stopping your script.
 
 **Theme editor.** `ThemeManager:BuildThemeEditor(tab)` adds a folded "Theme editor" section: pick a starting theme, change the window, sidebar, group, control and text colours with a live preview, then save it under a name. Saved themes go in `<folder>/themes` and show up in every theme menu. Load them before building the Interface section, so its theme picker is built with them:
 

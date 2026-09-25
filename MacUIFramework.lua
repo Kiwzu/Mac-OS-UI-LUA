@@ -605,6 +605,40 @@ local function Round(value, decimals)
 	return math.floor(value * factor + 0.5) / factor
 end
 
+-- A Rounding option as whole decimal places (a stray 1.5 would break
+-- string.format).
+local function Places(value, fallback)
+	value = tonumber(value) or fallback or 0
+	if value ~= value then
+		value = 0
+	end
+	return math.clamp(math.floor(value), -6, 10)
+end
+
+-- The decimal places a step needs: 0.25 -> 2, 1e-05 -> 5.
+local function StepPlaces(step)
+	step = tonumber(step)
+	if not step or step <= 0 or step ~= step or step == math.huge then
+		return 0
+	end
+	for places = 0, 10 do
+		local scaled = step * 10 ^ places
+		if math.abs(scaled - math.floor(scaled + 0.5)) < 1e-9 then
+			return places
+		end
+	end
+	return 10
+end
+
+-- A finite number, or nil.
+local function Finite(value)
+	value = tonumber(value)
+	if value == nil or value ~= value or value == math.huge or value == -math.huge then
+		return nil
+	end
+	return value
+end
+
 local PushButton -- defined with the element helpers below
 
 local function IsPointer(input)
@@ -709,21 +743,49 @@ local function Themed(instance, map)
 end
 
 -- Re-resolves an instance's tokens (used after its state changes, e.g. hover).
+-- Only what changed is animated: a theme change restyles thousands of objects,
+-- and a tween for each would stall a frame. While a restyle tween is still on
+-- its way, every goal counts (a hover that ends as it starts must go back).
+local RestyleTweens = setmetatable({}, { __mode = "k" })
+-- (Roblox keeps numbers like transparency as 32-bit floats: 0.94 reads back
+-- as 0.9399999...)
+local function Same(current, value)
+	if type(current) == "number" and type(value) == "number" then
+		return math.abs(current - value) < 1e-4
+	end
+	return current == value
+end
 local function Restyle(instance, duration)
 	local entry = ThemeRegistry[instance]
 	if not entry then
 		return
 	end
-	local goals = {}
+	local running = RestyleTweens[instance]
+	if running and running.PlaybackState ~= Enum.PlaybackState.Playing then
+		running = nil
+		RestyleTweens[instance] = nil
+	end
+	local goals, any = {}, false
 	for property, token in pairs(entry) do
-		goals[property] = Resolve(token)
+		local value = Resolve(token)
+		if value ~= nil and (running or not Same(instance[property], value)) then
+			goals[property] = value
+			any = true
+		end
+	end
+	if not any then
+		return
 	end
 	if duration == 0 then
+		if running then
+			running:Cancel()
+			RestyleTweens[instance] = nil
+		end
 		for property, value in pairs(goals) do
 			instance[property] = value
 		end
 	else
-		Tween(instance, goals, duration or 0.18)
+		RestyleTweens[instance] = Tween(instance, goals, duration or 0.18)
 	end
 end
 
@@ -1022,10 +1084,26 @@ function MacUI:SetFont(family)
 end
 
 -- Registers a theme that inherits every token it doesn't define from `base` (Dark).
+-- Theme colours can be Color3s or hex strings ("#1e1e20").
+local function ThemeValue(token, value)
+	if type(value) ~= "string" then
+		return value
+	end
+	local ok, color = pcall(Color3.fromHex, (value:gsub("^#", "")))
+	if ok then
+		return color
+	end
+	warn(("[MacUI] theme colour %s: %q isn't a hex colour"):format(tostring(token), value))
+	return nil
+end
+
 function MacUI:AddTheme(name, tokens, base)
 	local theme = table.clone(self.Themes[base or "Dark"] or self.Themes.Dark)
 	for token, value in pairs(tokens or {}) do
-		theme[token] = value
+		value = ThemeValue(token, value)
+		if value ~= nil then
+			theme[token] = value
+		end
 	end
 	self.Themes[name] = theme
 	if self.ThemeName == name then
@@ -1057,7 +1135,10 @@ end
 function MacUI:PreviewTheme(tokens, base)
 	local theme = table.clone(self.Themes[base or self.ThemeName] or self.Themes.Dark)
 	for token, value in pairs(tokens or {}) do
-		theme[token] = value
+		value = ThemeValue(token, value)
+		if value ~= nil then
+			theme[token] = value
+		end
 	end
 	self.ThemeData = theme
 	RefreshTheme(0.15)
@@ -1390,6 +1471,17 @@ function MacUI:Notify(config)
 	end)
 
 	table.insert(Banners, 1, banner)
+	-- no more than fit on the screen, five at most: the oldest make way
+	local function StackHeight()
+		local height = 12
+		for _, other in ipairs(Banners) do
+			height += other.Height * other.Scale + 10
+		end
+		return height
+	end
+	while #Banners > 1 and (#Banners > 5 or StackHeight() > Viewport().Y - 24) do
+		Banners[#Banners]:Close()
+	end
 	holder.Position = UDim2.new(1, width * scale + 40, 0, 12)
 	LayoutBanners()
 	banner.Shown = true
@@ -1455,10 +1547,13 @@ function MacUI:SetWatermark(options)
 		WatermarkGui:Destroy()
 		WatermarkGui = nil
 	end
+	self.Watermark = nil
 	if not options or self.Unloaded then
 		return nil
 	end
-	if type(options) ~= "table" then
+	if options == true then
+		options = {}
+	elseif type(options) ~= "table" then
 		options = { Text = options }
 	end
 	-- Under the windows: on a small screen it can't cover a window's toolbar
@@ -1530,9 +1625,14 @@ function MacUI:SetWatermark(options)
 			local ok, value = pcall(text)
 			text = ok and value or ""
 		end
-		return tostring(text or "MacUI")
+		if text == nil then
+			-- (SetWatermark(true): the window's title)
+			local window = MacUI.Windows[1]
+			text = window and window.Title or "MacUI"
+		end
+		return tostring(text)
 	end
-	local title = Segment(TitleText(), "Text", Enum.FontWeight.Bold)
+	local title = Segment(type(options.Text) == "function" and "" or TitleText(), "Text", Enum.FontWeight.Bold)
 	local fps = options.Fps ~= false and Segment("144 fps", "SubText") or nil
 	local ping = options.Ping ~= false and Segment("999 ms", "SubText") or nil
 	local clock = options.Clock and Segment("00:00", "SubText") or nil
@@ -1548,6 +1648,15 @@ function MacUI:SetWatermark(options)
 	end
 	local function Layout()
 		title.Size = UDim2.fromOffset(math.ceil(MeasureText(title.Text, 12, Enum.FontWeight.Bold)) + 2, 28)
+		-- a number longer than its template (1000+ fps) widens its slot; slots
+		-- never shrink, so the pill doesn't twitch
+		for index = 2, #segments do
+			local label = segments[index]
+			local needed = math.ceil(MeasureText(label.Text, 12, Enum.FontWeight.Medium)) + 2
+			if needed > label.Size.X.Offset then
+				label.Size = UDim2.fromOffset(needed, 28)
+			end
+		end
 		local x = 32
 		for index, label in ipairs(segments) do
 			if index > 1 then
@@ -1580,6 +1689,27 @@ function MacUI:SetWatermark(options)
 			end
 		end),
 	}
+	-- A Text function runs on its own thread, one call at a time: one that
+	-- waits (a web request, say) can't pile up calls or hold the counters.
+	local fetching = false
+	local function RefreshTitle()
+		if type(options.Text) ~= "function" then
+			title.Text = TitleText()
+			return
+		end
+		if fetching then
+			return
+		end
+		fetching = true
+		task.spawn(function()
+			local text = TitleText()
+			fetching = false
+			if gui.Parent then
+				title.Text = text
+				Layout()
+			end
+		end)
+	end
 	local frames, elapsed = 0, 0
 	table.insert(connections, RunService.Heartbeat:Connect(function(dt)
 		frames += 1
@@ -1587,7 +1717,7 @@ function MacUI:SetWatermark(options)
 		if elapsed < 0.5 then
 			return
 		end
-		title.Text = TitleText()
+		RefreshTitle()
 		if fps then
 			fps.Text = math.floor(frames / elapsed + 0.5) .. " fps"
 		end
@@ -1615,12 +1745,13 @@ function MacUI:SetWatermark(options)
 	if clock then
 		clock.Text = os.date("%H:%M")
 	end
+	RefreshTitle()
 	Layout()
 
 	local watermark = { Instance = holder }
 	function watermark:SetText(text)
 		options.Text = text
-		title.Text = TitleText()
+		RefreshTitle()
 		Layout()
 	end
 	function watermark:SetVisible(visible)
@@ -1629,6 +1760,9 @@ function MacUI:SetWatermark(options)
 	function watermark:Destroy()
 		if WatermarkGui == gui then
 			WatermarkGui = nil
+		end
+		if MacUI.Watermark == watermark then
+			MacUI.Watermark = nil
 		end
 		gui:Destroy()
 	end
@@ -3895,18 +4029,15 @@ function Container:AddSlider(idx, info)
 	idx, info = ParseArgs(idx, info)
 	local row = CreateRow(self, info)
 	local Slider = NewElement("Slider", row, info)
-	Slider.Min = tonumber(info.Min) or 0
-	Slider.Max = tonumber(info.Max) or 100
-	Slider.Increment = tonumber(info.Increment or info.Step)
-	local stepDecimals = 0
-	if Slider.Increment then
-		local fraction = tostring(Slider.Increment):match("%.(%d+)$")
-		stepDecimals = fraction and #fraction or 0
-	end
-	Slider.Rounding = tonumber(info.Rounding) or stepDecimals
+	-- (Min above Max would make every clamp fail: they're put in order)
+	Slider.Min = Finite(info.Min) or 0
+	Slider.Max = Finite(info.Max) or 100
+	Slider.Min, Slider.Max = math.min(Slider.Min, Slider.Max), math.max(Slider.Min, Slider.Max)
+	Slider.Increment = Finite(info.Increment or info.Step)
+	Slider.Rounding = Places(info.Rounding, StepPlaces(Slider.Increment))
 	Slider.Finished = info.Finished == true
 	Slider.Suffix = info.Suffix or ""
-	Slider.Value = math.clamp(tonumber(info.Default) or Slider.Min, Slider.Min, Slider.Max)
+	Slider.Value = math.clamp(Finite(info.Default) or Slider.Min, Slider.Min, Slider.Max)
 
 	local width = info.Width or 170
 	local rail = New("Frame", {
@@ -3988,7 +4119,7 @@ function Container:AddSlider(idx, info)
 	end
 
 	local function Normalize(value)
-		value = math.clamp(tonumber(value) or Slider.Min, Slider.Min, Slider.Max)
+		value = math.clamp(Finite(value) or Slider.Min, Slider.Min, Slider.Max)
 		if Slider.Increment and Slider.Increment > 0 then
 			value = Slider.Min + Round((value - Slider.Min) / Slider.Increment) * Slider.Increment
 		end
@@ -4010,13 +4141,16 @@ function Container:AddSlider(idx, info)
 		end
 	end
 
+	-- (a minimum above the maximum moves the maximum up, and the other way round)
 	function Slider:SetMin(value)
-		self.Min = value
+		self.Min = Finite(value) or self.Min
+		self.Max = math.max(self.Max, self.Min)
 		self:SetValue(self.Value)
 	end
 
 	function Slider:SetMax(value)
-		self.Max = value
+		self.Max = Finite(value) or self.Max
+		self.Min = math.min(self.Min, self.Max)
 		self:SetValue(self.Value)
 	end
 
@@ -5104,7 +5238,7 @@ function Container:AddProgress(idx, info)
 	idx, info = ParseArgs(idx, info)
 	local row = CreateRow(self, info)
 	local Progress = NewElement("Progress", row, info)
-	Progress.Max = tonumber(info.Max) or 100
+	Progress.Max = math.max(Finite(info.Max) or 100, 0)
 	Progress.Value = math.clamp(tonumber(info.Default or info.Value) or 0, 0, Progress.Max)
 
 	local bar = New("Frame", {
@@ -5154,15 +5288,15 @@ function Container:AddStepper(idx, info)
 	idx, info = ParseArgs(idx, info)
 	local row = CreateRow(self, info)
 	local Stepper = NewElement("Stepper", row, info)
-	Stepper.Min = tonumber(info.Min) or 0
-	Stepper.Max = tonumber(info.Max) or 100
-	Stepper.Step = tonumber(info.Step or info.Increment) or 1
-	local fraction = tostring(Stepper.Step):match("%.(%d+)$")
-	Stepper.Rounding = tonumber(info.Rounding) or (fraction and #fraction or 0)
+	Stepper.Min = Finite(info.Min) or 0
+	Stepper.Max = Finite(info.Max) or 100
+	Stepper.Min, Stepper.Max = math.min(Stepper.Min, Stepper.Max), math.max(Stepper.Min, Stepper.Max)
+	Stepper.Step = Finite(info.Step or info.Increment) or 1
+	Stepper.Rounding = Places(info.Rounding, StepPlaces(Stepper.Step))
 	Stepper.Suffix = info.Suffix or ""
 
 	local function Normalize(value)
-		return math.clamp(Round(tonumber(value) or Stepper.Min, Stepper.Rounding), Stepper.Min, Stepper.Max)
+		return math.clamp(Round(Finite(value) or Stepper.Min, Stepper.Rounding), Stepper.Min, Stepper.Max)
 	end
 	local function Format(value)
 		return string.format("%." .. math.max(Stepper.Rounding, 0) .. "f", value) .. Stepper.Suffix
@@ -5638,7 +5772,7 @@ function Container:AddGraph(idx, info)
 	Graph.Min = tonumber(info.Min)
 	Graph.Max = tonumber(info.Max)
 	Graph.Suffix = info.Suffix or ""
-	Graph.Rounding = tonumber(info.Rounding) or 0
+	Graph.Rounding = Places(info.Rounding, 0)
 	Graph.Values = {}
 
 	local chart = New("Frame", {
@@ -5703,6 +5837,19 @@ function Container:AddGraph(idx, info)
 		Corner(bar, 2)
 		bars[index] = bar
 	end
+	-- 2px between bars, less when there are too many for that (a fixed gap
+	-- would leave nothing of the bars)
+	local gap = 2
+	local function LayoutBars()
+		local scale = math.max(row.Window:GetAbsoluteScale(), 0.01)
+		local slot = plot.AbsoluteSize.X / scale / Graph.Points
+		gap = slot >= 6 and 2 or (slot >= 3 and 1 or 0)
+		for index, bar in ipairs(bars) do
+			bar.Position = UDim2.new((index - 1) / Graph.Points, gap / 2, 1, 0)
+			bar.Size = UDim2.new(1 / Graph.Points, -gap, bar.Size.Y.Scale, 0)
+		end
+	end
+	plot:GetPropertyChangedSignal("AbsoluteSize"):Connect(LayoutBars)
 
 	local function Format(value)
 		return string.format("%." .. math.max(Graph.Rounding, 0) .. "f", value) .. Graph.Suffix
@@ -5730,7 +5877,7 @@ function Container:AddGraph(idx, info)
 			local value = values[count - Graph.Points + index] -- newest on the right
 			if value then
 				local alpha = math.clamp((value - low) / (high - low), 0, 1)
-				bar.Size = UDim2.new(1 / Graph.Points, -2, math.max(alpha, 0.03), 0)
+				bar.Size = UDim2.new(1 / Graph.Points, -gap, math.max(alpha, 0.03), 0)
 				-- older samples fade a little so the latest reads first
 				bar.BackgroundTransparency = 0.5 * (1 - index / Graph.Points)
 				bar.Visible = true
@@ -5743,7 +5890,7 @@ function Container:AddGraph(idx, info)
 	end
 
 	function Graph:Push(value)
-		value = tonumber(value)
+		value = Finite(value) -- (NaN or infinity would break the scale)
 		if not value then
 			return
 		end
@@ -5758,8 +5905,8 @@ function Container:AddGraph(idx, info)
 	function Graph:SetValues(values)
 		self.Values = {}
 		for _, value in ipairs(values or {}) do
-			if tonumber(value) then
-				table.insert(self.Values, tonumber(value))
+			if Finite(value) then
+				table.insert(self.Values, Finite(value))
 			end
 		end
 		while #self.Values > self.Points do
@@ -5890,78 +6037,99 @@ function Container:AddTable(idx, info)
 	local sortColumn, sortDescending = nil, false
 	local headerLabels = {}
 	local entries = {}
+	-- when each row was added, so sorting is stable and can be undone
+	local sequence, nextSequence = {}, 0
 
-	local function Paint(entry)
-		Restyle(entry.Button, 0.1)
+	local function Selected(entry)
+		return Table.SelectedIndex == entry.Index
+	end
+
+	local function Paint(entry, duration)
+		Restyle(entry.Button, duration or 0.1)
 		for _, label in ipairs(entry.Labels) do
-			Restyle(label, 0.1)
+			Restyle(label, duration or 0.1)
 		end
 	end
 
-	local function Render()
-		for _, entry in ipairs(entries) do
-			entry.Button:Destroy()
-		end
-		table.clear(entries)
-		for index, data in ipairs(Table.Rows) do
-			local entry = { Data = data, Hovered = false, Labels = {} }
-			local function Selected()
-				return Table.Value == data
-			end
-			entry.Button = New("TextButton", {
-				Name = "Row",
-				Size = UDim2.new(1, 0, 0, rowHeight),
-				LayoutOrder = index,
+	local function MakeEntry(index)
+		local entry = { Index = index, Hovered = false, Labels = {} }
+		entry.Button = New("TextButton", {
+			Name = "Row",
+			Size = UDim2.new(1, 0, 0, rowHeight),
+			LayoutOrder = index,
+			Theme = {
+				BackgroundColor3 = function(t)
+					return Selected(entry) and MacUI.Accent or t.Hover
+				end,
+				BackgroundTransparency = function(t)
+					if Selected(entry) then
+						return 0
+					elseif entry.Hovered then
+						return t.HoverTransparency - 0.02
+					end
+					return entry.Index % 2 == 0 and math.min(t.HoverTransparency + 0.025, 1) or 1
+				end,
+			},
+			Parent = body,
+		})
+		for _, column in ipairs(columns) do
+			table.insert(entry.Labels, New("TextLabel", {
+				Text = "",
+				TextSize = 13,
+				TextXAlignment = column.Align,
+				Position = UDim2.new(column.X, 10, 0, 0),
+				Size = UDim2.new(column.Scale, -20, 1, 0),
+				TextTruncate = Enum.TextTruncate.AtEnd,
 				Theme = {
-					BackgroundColor3 = function(t)
-						return Selected() and MacUI.Accent or t.Hover
-					end,
-					BackgroundTransparency = function(t)
-						if Selected() then
-							return 0
-						elseif entry.Hovered then
-							return t.HoverTransparency - 0.02
+					TextColor3 = function(t)
+						if Selected(entry) then
+							return t.SelectionText
 						end
-						return index % 2 == 0 and math.min(t.HoverTransparency + 0.025, 1) or 1
+						return column.Index == 1 and t.Text or t.SubText
 					end,
 				},
-				Parent = body,
-			})
-			for _, column in ipairs(columns) do
-				local value = Cell(data, column)
-				table.insert(entry.Labels, New("TextLabel", {
-					Text = value == nil and "" or tostring(value),
-					TextSize = 13,
-					TextXAlignment = column.Align,
-					Position = UDim2.new(column.X, 10, 0, 0),
-					Size = UDim2.new(column.Scale, -20, 1, 0),
-					TextTruncate = Enum.TextTruncate.AtEnd,
-					Theme = {
-						TextColor3 = function(t)
-							if Selected() then
-								return t.SelectionText
-							end
-							return column.Index == 1 and t.Text or t.SubText
-						end,
-					},
-					Parent = entry.Button,
-				}))
+				Parent = entry.Button,
+			}))
+		end
+		entry.Button.MouseEnter:Connect(function()
+			entry.Hovered = true
+			Paint(entry)
+		end)
+		entry.Button.MouseLeave:Connect(function()
+			entry.Hovered = false
+			Paint(entry)
+		end)
+		entry.Button.MouseButton1Click:Connect(function()
+			if not row.Disabled then
+				Table:Select(entry.Index)
 			end
-			entry.Button.MouseEnter:Connect(function()
-				entry.Hovered = true
-				Paint(entry)
-			end)
-			entry.Button.MouseLeave:Connect(function()
-				entry.Hovered = false
-				Paint(entry)
-			end)
-			entry.Button.MouseButton1Click:Connect(function()
-				if not row.Disabled then
-					Table:Select(data)
+		end)
+		row:_BindContext(entry.Button)
+		return entry
+	end
+
+	-- Shows the rows, reusing the ones already on screen (a live list can
+	-- change every second).
+	local function Render()
+		for index, data in ipairs(Table.Rows) do
+			local entry = entries[index]
+			if not entry then
+				entry = MakeEntry(index)
+				entries[index] = entry
+			end
+			for columnIndex, column in ipairs(columns) do
+				local value = Cell(data, column)
+				local text = value == nil and "" or tostring(value)
+				local label = entry.Labels[columnIndex]
+				if label.Text ~= text then
+					label.Text = text
 				end
-			end)
-			row:_BindContext(entry.Button)
-			entries[index] = entry
+			end
+			Paint(entry, 0) -- (the selection may have moved)
+		end
+		for index = #entries, #Table.Rows + 1, -1 do
+			entries[index].Button:Destroy()
+			entries[index] = nil
 		end
 		empty.Visible = #Table.Rows == 0
 		local shown = math.clamp(#Table.Rows, 1, Table.MaxRows)
@@ -5974,38 +6142,79 @@ function Container:AddTable(idx, info)
 		end
 	end
 
-	-- numbers sort numerically and before text; text ignores case
-	local function Before(a, b)
-		local na, nb = type(a) == "number", type(b) == "number"
-		if na and nb then
-			return a < b
-		elseif na ~= nb then
-			return na
+	-- Numbers, and text that is a number ("10"), sort by value and before
+	-- other text; text ignores case.
+	local function SortKey(value)
+		if type(value) == "number" then
+			return value == value and value or "nan"
 		end
-		return tostring(a or ""):lower() < tostring(b or ""):lower()
+		local text = value == nil and "" or tostring(value)
+		local number = tonumber(text)
+		if number and number == number then
+			return number
+		end
+		return text:lower()
+	end
+	local function Before(a, b)
+		local x, y = SortKey(a), SortKey(b)
+		local numberX, numberY = type(x) == "number", type(y) == "number"
+		if numberX ~= numberY then
+			return numberX
+		end
+		return x < y
 	end
 
-	-- Sorts by a column (its title, index or table); again to flip the order.
-	function Table:SortBy(column, descending)
-		if type(column) ~= "table" then
-			for _, candidate in ipairs(columns) do
-				if candidate.Title == column or candidate.Index == column then
-					column = candidate
+	-- Puts the rows in order (the sort, else the order they were added in),
+	-- keeping the selected row selected.
+	local function Arrange()
+		local order = {}
+		for index, data in ipairs(Table.Rows) do
+			order[index] = { Data = data, Sequence = sequence[index], Index = index }
+		end
+		table.sort(order, function(a, b)
+			if sortColumn then
+				local x, y = Cell(a.Data, sortColumn), Cell(b.Data, sortColumn)
+				if sortDescending then
+					x, y = y, x
+				end
+				if Before(x, y) then
+					return true
+				elseif Before(y, x) then
+					return false
 				end
 			end
-		end
-		if type(column) ~= "table" then
-			return
-		end
-		sortColumn, sortDescending = column, descending == true
-		table.sort(self.Rows, function(a, b)
-			local x, y = Cell(a, column), Cell(b, column)
-			if sortDescending then
-				return Before(y, x)
-			end
-			return Before(x, y)
+			return a.Sequence < b.Sequence
 		end)
-		self.SelectedIndex = self.Value ~= nil and table.find(self.Rows, self.Value) or nil
+		local selected = Table.SelectedIndex
+		Table.SelectedIndex = nil
+		for index, item in ipairs(order) do
+			Table.Rows[index] = item.Data
+			sequence[index] = item.Sequence
+			if item.Index == selected then
+				Table.SelectedIndex = index
+			end
+		end
+		Table.Value = Table.SelectedIndex and Table.Rows[Table.SelectedIndex] or nil
+	end
+
+	-- Sorts by a column (its title, index or table); nil goes back to the
+	-- order the rows were added in.
+	function Table:SortBy(column, descending)
+		if column ~= nil and type(column) ~= "table" then
+			local found
+			for _, candidate in ipairs(columns) do
+				if candidate.Title == column or candidate.Index == column then
+					found = candidate
+					break
+				end
+			end
+			if not found then
+				return
+			end
+			column = found
+		end
+		sortColumn, sortDescending = column, column ~= nil and descending == true
+		Arrange()
 		Render()
 	end
 
@@ -6027,21 +6236,31 @@ function Container:AddTable(idx, info)
 			Parent = header,
 		})
 		headerLabels[column.Index] = label
+		-- up, down, then back to the order they were added in
 		label.MouseButton1Click:Connect(function()
-			if info.Sortable ~= false then
-				Table:SortBy(column, sortColumn == column and not sortDescending)
+			if info.Sortable == false then
+				return
+			end
+			if sortColumn ~= column then
+				Table:SortBy(column, false)
+			elseif not sortDescending then
+				Table:SortBy(column, true)
+			else
+				Table:SortBy(nil)
 			end
 		end)
 	end
 
-	-- Selects a row (the row table or its index); nil clears the selection.
+	-- Selects a row (its index, or the row itself); nil clears the selection.
 	function Table:Select(target)
-		local data = type(target) == "number" and self.Rows[target] or target
-		if data ~= nil and not table.find(self.Rows, data) then
-			data = nil
+		local index
+		if type(target) == "number" then
+			index = self.Rows[target] ~= nil and target or nil
+		elseif target ~= nil then
+			index = table.find(self.Rows, target)
 		end
-		self.Value = data
-		self.SelectedIndex = data ~= nil and table.find(self.Rows, data) or nil
+		self.SelectedIndex = index
+		self.Value = index and self.Rows[index] or nil
 		for _, entry in ipairs(entries) do
 			Paint(entry)
 		end
@@ -6050,32 +6269,40 @@ function Container:AddTable(idx, info)
 	Table.SetValue = Table.Select
 
 	function Table:SetRows(rows)
-		self.Rows = {}
+		local previous = self.Value
+		self.Rows, sequence = {}, {}
 		for _, data in ipairs(rows or {}) do
+			nextSequence += 1
 			table.insert(self.Rows, data)
+			table.insert(sequence, nextSequence)
 		end
-		if self.Value ~= nil and not table.find(self.Rows, self.Value) then
-			self.Value = nil
-			self.SelectedIndex = nil
-		end
-		if sortColumn then
-			self:SortBy(sortColumn, sortDescending)
-		else
-			self.SelectedIndex = self.Value ~= nil and table.find(self.Rows, self.Value) or nil
-			Render()
-		end
+		-- the same row stays selected if it's still there
+		self.SelectedIndex = previous ~= nil and table.find(self.Rows, previous) or nil
+		Arrange()
+		Render()
 	end
 	function Table:AddRow(data)
+		nextSequence += 1
 		table.insert(self.Rows, data)
-		self:SetRows(self.Rows)
+		table.insert(sequence, nextSequence)
+		Arrange()
+		Render()
 		return data
 	end
 	function Table:RemoveRow(target)
 		local index = type(target) == "number" and target or table.find(self.Rows, target)
-		if index and self.Rows[index] ~= nil then
-			table.remove(self.Rows, index)
-			self:SetRows(self.Rows)
+		if not index or self.Rows[index] == nil then
+			return
 		end
+		table.remove(self.Rows, index)
+		table.remove(sequence, index)
+		if self.SelectedIndex == index then
+			self.SelectedIndex = nil
+		elseif self.SelectedIndex and self.SelectedIndex > index then
+			self.SelectedIndex -= 1
+		end
+		self.Value = self.SelectedIndex and self.Rows[self.SelectedIndex] or nil
+		Render()
 	end
 	function Table:Clear()
 		self:SetRows({})
@@ -6933,31 +7160,57 @@ local function AcrylicSupported()
 end
 
 local function CreateAcrylic(target)
-	local controller = { Enabled = false }
+	local controller = { Enabled = false, Destroyed = false }
 	local Lighting = GetService("Lighting")
-	local effect = Instance.new("DepthOfFieldEffect")
-	effect.Name = "MacUI_Acrylic"
-	effect.FarIntensity = 0
-	effect.InFocusRadius = 0.1
-	effect.NearIntensity = 1
-	local part = Instance.new("Part")
-	part.Name = "MacUI_Acrylic"
-	part.Color = Color3.new(0, 0, 0)
-	part.Material = Enum.Material.Glass
-	part.Size = Vector3.new(1, 1, 0)
-	part.Anchored = true
-	part.CanCollide = false
-	part.CanQuery = false
-	part.CanTouch = false
-	part.CastShadow = false
-	part.Locked = true
-	part.Transparency = 1
-	local mesh = Instance.new("SpecialMesh")
-	mesh.MeshType = Enum.MeshType.Brick
-	mesh.Offset = Vector3.new(0, 0, -0.000001)
-	mesh.Parent = part
+	-- The game can destroy these (clearing Lighting, or along with an old
+	-- camera): they're made again when needed.
+	local effect, part, mesh
+	local function Effect()
+		if not effect then
+			local made = Instance.new("DepthOfFieldEffect")
+			made.Name = "MacUI_Acrylic"
+			made.FarIntensity = 0
+			made.InFocusRadius = 0.1
+			made.NearIntensity = 1
+			made.Destroying:Connect(function()
+				if effect == made then
+					effect = nil
+				end
+			end)
+			effect = made
+		end
+		return effect
+	end
+	local function Glass()
+		if not part then
+			local made = Instance.new("Part")
+			made.Name = "MacUI_Acrylic"
+			made.Color = Color3.new(0, 0, 0)
+			made.Material = Enum.Material.Glass
+			made.Size = Vector3.new(1, 1, 0)
+			made.Anchored = true
+			made.CanCollide = false
+			made.CanQuery = false
+			made.CanTouch = false
+			made.CastShadow = false
+			made.Locked = true
+			made.Transparency = 1
+			local special = Instance.new("SpecialMesh")
+			special.MeshType = Enum.MeshType.Brick
+			special.Offset = Vector3.new(0, 0, -0.000001)
+			special.Parent = made
+			made.Destroying:Connect(function()
+				if part == made then
+					part, mesh = nil, nil
+				end
+			end)
+			part, mesh = made, special
+		end
+		return part, mesh
+	end
 	local suspended = {}
 	local connection
+	local failures = 0
 
 	local function Suspend()
 		for _, container in ipairs({ Lighting, Workspace.CurrentCamera }) do
@@ -6983,11 +7236,18 @@ local function CreateAcrylic(target)
 		local camera = Workspace.CurrentCamera
 		local size = target.AbsoluteSize
 		if not camera or not controller.Enabled or not target.Visible or size.X < 2 or size.Y < 2 then
-			part.Transparency = 1
+			if part then
+				part.Transparency = 1
+			end
 			return
 		end
-		if part.Parent ~= camera then
-			part.Parent = camera
+		local blur = Effect()
+		if blur.Parent ~= Lighting then
+			blur.Parent = Lighting
+		end
+		local glass, glassMesh = Glass()
+		if glass.Parent ~= camera then
+			glass.Parent = camera
 		end
 		local position = target.AbsolutePosition
 		local function World(x, y)
@@ -6998,37 +7258,59 @@ local function CreateAcrylic(target)
 		local topRight = World(position.X + size.X, position.Y)
 		local bottomRight = World(position.X + size.X, position.Y + size.Y)
 		local frame = camera.CFrame
-		part.CFrame = CFrame.fromMatrix((topLeft + bottomRight) / 2, frame.XVector, frame.YVector, frame.ZVector)
-		mesh.Scale = Vector3.new((topRight - topLeft).Magnitude, (topRight - bottomRight).Magnitude, 0)
-		part.Transparency = 0.98
+		glass.CFrame = CFrame.fromMatrix((topLeft + bottomRight) / 2, frame.XVector, frame.YVector, frame.ZVector)
+		glassMesh.Scale = Vector3.new((topRight - topLeft).Magnitude, (topRight - bottomRight).Magnitude, 0)
+		glass.Transparency = 0.98
 	end
 
 	function controller:SetEnabled(enabled)
-		enabled = enabled == true
+		-- (a delayed call can arrive after Destroy)
+		enabled = enabled == true and not self.Destroyed
 		if enabled == self.Enabled then
 			return
 		end
 		self.Enabled = enabled
 		if enabled then
 			Suspend()
-			effect.Parent = Lighting
-			connection = RunService.RenderStepped:Connect(Render)
-			Render()
+			failures = 0
+			connection = RunService.RenderStepped:Connect(function()
+				-- a game fighting the effect mustn't get an error every frame
+				if not pcall(Render) then
+					failures += 1
+					if failures >= 30 then
+						controller:SetEnabled(false)
+					end
+				end
+			end)
+			pcall(Render)
 		else
 			if connection then
 				connection:Disconnect()
 				connection = nil
 			end
-			effect.Parent = nil
-			part.Transparency = 1
+			pcall(function()
+				if effect then
+					effect.Parent = nil
+				end
+				if part then
+					part.Transparency = 1
+				end
+			end)
 			Resume()
 		end
 	end
 
 	function controller:Destroy()
 		self:SetEnabled(false)
-		effect:Destroy()
-		part:Destroy()
+		self.Destroyed = true
+		pcall(function()
+			if effect then
+				effect:Destroy()
+			end
+			if part then
+				part:Destroy()
+			end
+		end)
 	end
 
 	return controller
