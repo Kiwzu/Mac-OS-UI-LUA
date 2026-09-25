@@ -605,8 +605,25 @@ local function IsPointer(input)
 	return input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch
 end
 
-local function IsMove(input)
-	return input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch
+-- A drag follows the input that started it: the mouse, or that one finger. A
+-- second finger (the movement thumbstick, say) neither moves nor ends it.
+local function DragMoves(began, input)
+	if began.UserInputType == Enum.UserInputType.Touch then
+		return input == began
+	end
+	return input.UserInputType == Enum.UserInputType.MouseMovement
+end
+
+local function DragEnds(began, input)
+	if began.UserInputType == Enum.UserInputType.Touch then
+		return input == began
+	end
+	return input.UserInputType == Enum.UserInputType.MouseButton1
+end
+
+-- A phone or tablet with no keyboard.
+local function TouchOnly()
+	return UserInputService.TouchEnabled and not UserInputService.KeyboardEnabled
 end
 
 local function GetFont(weight)
@@ -1120,7 +1137,7 @@ local NotificationGui
 local Banners = {}
 
 local function NotificationScale()
-	return math.clamp(Viewport().X / 1150, 0.72, 1)
+	return math.clamp(Viewport().X / 1150, TouchOnly() and 0.85 or 0.72, 1)
 end
 
 local function LayoutBanners()
@@ -1438,10 +1455,18 @@ function MacUI:SetWatermark(options)
 	if type(options) ~= "table" then
 		options = { Text = options }
 	end
+	-- Under the windows: on a small screen it can't cover a window's toolbar
+	-- or take its taps, and it's back in view when the window is hidden.
+	local order = 99
+	for _, window in ipairs(self.Windows) do
+		if window.ScreenGui then
+			order = math.min(order, window.ScreenGui.DisplayOrder - 1)
+		end
+	end
 	local gui = New("ScreenGui", {
 		Name = "MacUI_Watermark",
 		ResetOnSpawn = false,
-		DisplayOrder = 999,
+		DisplayOrder = order,
 		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
 	})
 	ParentGui(gui)
@@ -1533,18 +1558,18 @@ function MacUI:SetWatermark(options)
 	local drag
 	body.InputBegan:Connect(function(input)
 		if IsPointer(input) then
-			drag = { Start = input.Position, Origin = holder.Position }
+			drag = { Start = input.Position, Origin = holder.Position, Input = input }
 		end
 	end)
 	local connections = {
 		UserInputService.InputChanged:Connect(function(input)
-			if drag and IsMove(input) then
+			if drag and DragMoves(drag.Input, input) then
 				local delta = input.Position - drag.Start
 				holder.Position = drag.Origin + UDim2.fromOffset(delta.X, delta.Y)
 			end
 		end),
 		UserInputService.InputEnded:Connect(function(input)
-			if IsPointer(input) then
+			if drag and DragEnds(drag.Input, input) then
 				drag = nil
 			end
 		end),
@@ -3928,21 +3953,30 @@ function Container:AddSlider(idx, info)
 		knobState.Hovered = false
 		RenderKnob()
 	end)
+	-- a finger sliding along the track shouldn't also scroll the page
+	local function PageScrolling(enabled)
+		local page = row.Tab and row.Tab.Page
+		if page then
+			page.ScrollingEnabled = enabled
+		end
+	end
 	hit.InputBegan:Connect(function(input)
 		if IsPointer(input) and not row.Disabled then
-			knobState.Dragging = true
+			knobState.Dragging = input
+			PageScrolling(false)
 			RenderKnob()
 			SetFromPointer(input.Position.X)
 		end
 	end)
 	row:Connect(UserInputService.InputChanged, function(input)
-		if knobState.Dragging and IsMove(input) then
+		if knobState.Dragging and DragMoves(knobState.Dragging, input) then
 			SetFromPointer(input.Position.X)
 		end
 	end)
 	row:Connect(UserInputService.InputEnded, function(input)
-		if knobState.Dragging and IsPointer(input) then
+		if knobState.Dragging and DragEnds(knobState.Dragging, input) then
 			knobState.Dragging = false
+			PageScrolling(true)
 			RenderKnob()
 			if pendingEmit then
 				pendingEmit = false
@@ -4774,7 +4808,7 @@ function Container:AddColorpicker(idx, info)
 			end
 			Refresh()
 
-			local dragging
+			local dragging, dragInput
 			local function Update(position)
 				MarkActivity()
 				if dragging == "sv" then
@@ -4793,7 +4827,7 @@ function Container:AddColorpicker(idx, info)
 			local function Begin(kind)
 				return function(input)
 					if IsPointer(input) then
-						dragging = kind
+						dragging, dragInput = kind, input
 						Update(input.Position)
 					end
 				end
@@ -4804,13 +4838,13 @@ function Container:AddColorpicker(idx, info)
 				alpha.InputBegan:Connect(Begin("alpha"))
 			end
 			popover:Connect(UserInputService.InputChanged, function(input)
-				if dragging and IsMove(input) then
+				if dragging and DragMoves(dragInput, input) then
 					Update(input.Position)
 				end
 			end)
 			popover:Connect(UserInputService.InputEnded, function(input)
-				if IsPointer(input) then
-					dragging = nil
+				if dragging and DragEnds(dragInput, input) then
+					dragging, dragInput = nil, nil
 				end
 			end)
 			hexBox.Focused:Connect(function()
@@ -7040,6 +7074,9 @@ function MacUI:CreateWindow(config)
 
 	local size = SizeFromConfig(config.Size, Vector2.new(780, 540))
 	local minSize = SizeFromConfig(config.MinSize, Vector2.new(560, 380))
+	-- the size asked for (by the script, a resize or a saved state); the window
+	-- is smaller while the screen can't fit it
+	local wantedSize = size
 	local sidebarWidth = math.max(config.TabWidth or config.SidebarWidth or 214, 150)
 	local sidebarStyle = config.SidebarStyle or "Tile"
 	local toolbarHeight = 52
@@ -7108,6 +7145,15 @@ function MacUI:CreateWindow(config)
 	local RootScale = New("UIScale", { Scale = 1, Parent = Root })
 	local ScaleTween
 	InterfaceRoots[Root] = true
+	-- Roblox frees a locked mouse (first person, shift lock) while a modal
+	-- button is visible: this one is, whenever the window is open.
+	New("TextButton", {
+		Name = "MouseUnlock",
+		Modal = true,
+		BackgroundTransparency = 1,
+		Size = UDim2.fromOffset(1, 1),
+		Parent = Root,
+	})
 
 	-- The scale currently applied on screen (differs from Window.Scale mid-animation).
 	function Window:GetAbsoluteScale()
@@ -7565,23 +7611,37 @@ function MacUI:CreateWindow(config)
 		Theme = { TextColor3 = "Text", PlaceholderColor3 = "SubText" },
 		Parent = Search,
 	})
+	-- "Ctrl K" with a keyboard; on a touch screen, a tappable command icon
+	local touchSpotlight = TouchOnly()
 	local SpotlightHint = New("TextButton", {
 		Name = "SpotlightHint",
-		Text = "Ctrl K",
+		Text = touchSpotlight and "" or "Ctrl K",
 		TextSize = 11,
 		Weight = Enum.FontWeight.Medium,
 		AnchorPoint = Vector2.new(1, 0.5),
 		Position = UDim2.new(1, -6, 0.5, 0),
-		Size = UDim2.fromOffset(0, 18),
-		AutomaticSize = Enum.AutomaticSize.X,
+		Size = touchSpotlight and UDim2.fromOffset(26, 20) or UDim2.fromOffset(0, 18),
+		AutomaticSize = touchSpotlight and Enum.AutomaticSize.None or Enum.AutomaticSize.X,
 		BackgroundTransparency = 0,
-		Visible = config.Spotlight ~= false and UserInputService.KeyboardEnabled,
+		Visible = config.Spotlight ~= false and (UserInputService.KeyboardEnabled or touchSpotlight),
 		ZIndex = 3,
 		Theme = { BackgroundColor3 = "Control", TextColor3 = "SubText" },
 		Parent = Search,
 	})
 	Corner(SpotlightHint, 5)
-	Padding(SpotlightHint, 0, 6, 0, 6)
+	if touchSpotlight then
+		IconImage({
+			Icon = "command",
+			IconSize = 12,
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.fromScale(0.5, 0.5),
+			ZIndex = 4,
+			Theme = { ImageColor3 = "SubText" },
+			Parent = SpotlightHint,
+		})
+	else
+		Padding(SpotlightHint, 0, 6, 0, 6)
+	end
 	local SearchClear = New("TextButton", {
 		Name = "Clear",
 		AnchorPoint = Vector2.new(1, 0.5),
@@ -7668,26 +7728,40 @@ function MacUI:CreateWindow(config)
 	-- Traffic lights
 	----------------------------------------------------------------------------
 
+	-- on a touch screen the lights sit further apart, each with a finger-sized
+	-- invisible target around it
+	local lightGap = TouchOnly() and 28 or 20
 	local Lights = New("Frame", {
 		Name = "TrafficLights",
 		BackgroundTransparency = 1,
 		Position = UDim2.fromOffset(18, 20),
-		Size = UDim2.fromOffset(52, 12),
+		Size = UDim2.fromOffset(lightGap * 2 + 12, 12),
 		ZIndex = 20,
 		Parent = Holder,
 	})
 	local LightGlyphs = {}
 	local LightButtons = {}
+	local LightTargets = {}
 	for index, spec in ipairs(TRAFFIC) do
 		local button = New("TextButton", {
 			Name = spec.Name,
-			Position = UDim2.fromOffset((index - 1) * 20, 0),
+			Position = UDim2.fromOffset((index - 1) * lightGap, 0),
 			Size = UDim2.fromOffset(12, 12),
 			BackgroundTransparency = 0,
 			BackgroundColor3 = spec.Color,
 			ZIndex = 21,
 			Parent = Lights,
 		})
+		if TouchOnly() then
+			LightTargets[spec.Name] = New("TextButton", {
+				Name = "Target",
+				AnchorPoint = Vector2.new(0.5, 0.5),
+				Position = UDim2.fromScale(0.5, 0.5),
+				Size = UDim2.fromOffset(28, 28),
+				ZIndex = 23,
+				Parent = button,
+			})
+		end
 		Corner(button, 6)
 		New("UIStroke", { Color = spec.Stroke, Thickness = 1, Transparency = 0.45, Parent = button })
 		local glyphs = {}
@@ -7813,17 +7887,68 @@ function MacUI:CreateWindow(config)
 				row:_UpdateReserve()
 			end
 		end
+		if self._FitToScreen then
+			self._FitToScreen()
+		end
 	end
 
-	local function AutoScale()
+	local function ScreenSize()
 		local viewport = ScreenGui.AbsoluteSize
 		if viewport.X < 10 or viewport.Y < 10 then
 			viewport = Viewport() - Vector2.new(0, GuiService:GetGuiInset().Y)
 		end
-		local fit = math.min((viewport.X - 32) / size.X, (viewport.Y - 32) / size.Y, 1)
-		return math.max(fit, 0.5)
+		return viewport
 	end
+
+	local function AutoScale()
+		local viewport = ScreenSize()
+		-- the largest scale (up to 1) at which the minimum size fits: on a small
+		-- screen the window gets smaller before its text does
+		local fit = math.min((viewport.X - 32) / minSize.X, (viewport.Y - 32) / minSize.Y, 1)
+		-- and on a phone it never gets too small to read or tap
+		return math.max(fit, TouchOnly() and 0.85 or 0.5)
+	end
+
+	local function Between(value, low, high)
+		if low > high then
+			return (low + high) / 2
+		end
+		return math.clamp(value, low, high)
+	end
+
+	-- The size and position that keep the whole window on screen: a size saved
+	-- on a bigger screen, a rotated phone or a bigger interface scale shrinks it
+	-- (below MinSize if the screen is that small) and it's pulled back into
+	-- view. It grows back to the size asked for once there's room.
+	local function FittedLayout(position)
+		local viewport = ScreenSize()
+		if viewport.X < 10 or viewport.Y < 10 then
+			return wantedSize, position
+		end
+		local scale = Window.Scale
+		local width = math.min(wantedSize.X, (viewport.X - 16) / scale)
+		local height = math.min(wantedSize.Y, (viewport.Y - 16) / scale)
+		local halfWidth, halfHeight = width * scale / 2, height * scale / 2
+		local x = Between(position.X.Offset, halfWidth - viewport.X / 2, viewport.X / 2 - halfWidth)
+		local y = Between(position.Y.Offset, halfHeight - viewport.Y / 2, viewport.Y / 2 - halfHeight)
+		return Vector2.new(width, height), UDim2.new(0.5, x, 0.5, y)
+	end
+
+	local function FitToScreen()
+		if Window.Maximized then
+			return
+		end
+		local fitted, position = FittedLayout(Root.Position)
+		if fitted ~= Window.Size then
+			Window.Size = fitted
+			Root.Size = UDim2.fromOffset(fitted.X, fitted.Y)
+		end
+		Root.Position = position
+	end
+	Window._FitToScreen = FitToScreen
+
 	Window:SetScale(config.Scale or AutoScale())
+	FitToScreen()
 
 	----------------------------------------------------------------------------
 	-- Popups
@@ -8115,7 +8240,8 @@ function MacUI:CreateWindow(config)
 					empty.Visible = shown == 0
 				end)
 				task.defer(function()
-					if searchBox.Parent then
+					-- (on a touch screen the keyboard would cover the list)
+					if searchBox.Parent and not TouchOnly() then
 						searchBox:CaptureFocus()
 					end
 				end)
@@ -8879,7 +9005,7 @@ function MacUI:CreateWindow(config)
 	local function UpdateSearchChrome()
 		local empty = SearchBox.Text == ""
 		SearchClear.Visible = not empty
-		SpotlightHint.Visible = config.Spotlight ~= false and empty and not SearchBox:IsFocused() and UserInputService.KeyboardEnabled
+		SpotlightHint.Visible = config.Spotlight ~= false and empty and not SearchBox:IsFocused() and (UserInputService.KeyboardEnabled or touchSpotlight)
 	end
 	SearchBox:GetPropertyChangedSignal("Text"):Connect(UpdateSearchChrome)
 	SearchBox.Focused:Connect(function()
@@ -9005,7 +9131,7 @@ function MacUI:CreateWindow(config)
 		end
 		lastToolbarClick = now
 		if not Window.Maximized then
-			drag = { Start = input.Position, Position = Root.Position }
+			drag = { Start = input.Position, Position = Root.Position, Input = input }
 		end
 	end
 	Toolbar.InputBegan:Connect(BeginDrag)
@@ -9015,19 +9141,22 @@ function MacUI:CreateWindow(config)
 		Name = "ResizeGrip",
 		AnchorPoint = Vector2.new(1, 1),
 		Position = UDim2.fromScale(1, 1),
-		Size = UDim2.fromOffset(18, 18),
+		-- a finger needs a bigger corner to grab than a mouse
+		Size = TouchOnly() and UDim2.fromOffset(34, 34) or UDim2.fromOffset(18, 18),
 		ZIndex = 30,
 		Visible = config.Resizable ~= false,
 		Parent = Root,
 	})
 	Grip.InputBegan:Connect(function(input)
 		if IsPointer(input) and not Window.Maximized then
-			resize = { Start = input.Position, Size = Window.Size, Position = Root.Position }
+			resize = { Start = input.Position, Size = Window.Size, Position = Root.Position, Input = input }
 		end
 	end)
 
 	Connect(UserInputService.InputChanged, function(input)
-		if not IsMove(input) then
+		if drag and not DragMoves(drag.Input, input) then
+			return
+		elseif resize and not DragMoves(resize.Input, input) then
 			return
 		end
 		if drag then
@@ -9043,16 +9172,16 @@ function MacUI:CreateWindow(config)
 			local width = math.max(resize.Size.X + delta.X / scale, minSize.X)
 			local height = math.max(resize.Size.Y + delta.Y / scale, minSize.Y)
 			Window.Size = Vector2.new(width, height)
+			wantedSize = Window.Size
 			Root.Size = UDim2.fromOffset(width, height)
 			local grow = (Window.Size - resize.Size) * scale / 2
 			Root.Position = resize.Position + UDim2.fromOffset(grow.X, grow.Y)
 		end
 	end)
 	Connect(UserInputService.InputEnded, function(input)
-		if IsPointer(input) then
-			if drag or resize then
-				EmitState()
-			end
+		local active = drag or resize
+		if active and DragEnds(active.Input, input) then
+			EmitState()
 			drag = nil
 			resize = nil
 		end
@@ -9143,6 +9272,9 @@ function MacUI:CreateWindow(config)
 	end
 
 	function Window:Toggle()
+		if Window.Loading then
+			return -- the loading card is still up
+		end
 		if Window.Minimized then
 			Window:Restore()
 		else
@@ -9157,26 +9289,29 @@ function MacUI:CreateWindow(config)
 		end
 		Window.Maximized = maximized
 		if maximized then
-			restoreState = { Size = Window.Size, Position = Root.Position }
+			restoreState = { Position = Root.Position }
 			local viewport = ScreenGui.AbsoluteSize
 			local target = Vector2.new((viewport.X - 24) / Window.Scale, (viewport.Y - 24) / Window.Scale)
 			Window.Size = target
 			Tween(Root, { Size = UDim2.fromOffset(target.X, target.Y), Position = UDim2.fromScale(0.5, 0.5) }, 0.38)
 		elseif restoreState then
-			Window.Size = restoreState.Size
-			Tween(Root, { Size = UDim2.fromOffset(restoreState.Size.X, restoreState.Size.Y), Position = restoreState.Position }, 0.38)
+			-- (the screen may have changed while it was maximised)
+			local fitted, position = FittedLayout(restoreState.Position)
+			Window.Size = fitted
+			Tween(Root, { Size = UDim2.fromOffset(fitted.X, fitted.Y), Position = position }, 0.38)
 		end
 		EmitState()
 	end
 
-	-- Position, size, tab and sidebar state (InterfaceManager saves this).
+	-- Position, size, tab and sidebar state (InterfaceManager saves this). The
+	-- size is the one asked for, not what a small screen shrank it to.
 	function Window:GetState()
-		local base = Window.Maximized and restoreState or { Size = Window.Size, Position = Root.Position }
+		local position = Window.Maximized and restoreState and restoreState.Position or Root.Position
 		return {
-			X = base.Position.X.Offset,
-			Y = base.Position.Y.Offset,
-			Width = base.Size.X,
-			Height = base.Size.Y,
+			X = position.X.Offset,
+			Y = position.Y.Offset,
+			Width = wantedSize.X,
+			Height = wantedSize.Y,
 			Tab = Window.CurrentTab and Window.CurrentTab.Title or nil,
 			Sidebar = Window.SidebarVisible,
 		}
@@ -9188,17 +9323,20 @@ function MacUI:CreateWindow(config)
 		end
 		local width, height = tonumber(state.Width), tonumber(state.Height)
 		if width and height then
-			Window.Size = Vector2.new(math.max(width, minSize.X), math.max(height, minSize.Y))
-			Root.Size = UDim2.fromOffset(Window.Size.X, Window.Size.Y)
+			wantedSize = Vector2.new(math.max(width, minSize.X), math.max(height, minSize.Y))
 		end
 		local x, y = tonumber(state.X), tonumber(state.Y)
-		if x and y then
-			local screen = ScreenGui.AbsoluteSize
-			if screen.X > 10 then
-				x = math.clamp(x, -screen.X / 2 + 60, screen.X / 2 - 60)
-				y = math.clamp(y, -screen.Y / 2 + 30, screen.Y / 2 - 30)
+		if Window.Maximized then
+			-- applies when it's restored
+			if x and y and restoreState then
+				restoreState.Position = UDim2.new(0.5, x, 0.5, y)
 			end
-			Root.Position = UDim2.new(0.5, x, 0.5, y)
+		else
+			if x and y then
+				Root.Position = UDim2.new(0.5, x, 0.5, y)
+			end
+			-- (saved on a bigger screen: it shrinks and stays in view)
+			FitToScreen()
 		end
 		if state.Tab then
 			for _, tab in ipairs(Window.Tabs) do
@@ -9484,30 +9622,38 @@ function MacUI:CreateWindow(config)
 	-- Traffic light actions, dock, keyboard shortcut
 	----------------------------------------------------------------------------
 
-	LightButtons.Close.MouseButton1Click:Connect(function()
-		if config.ConfirmClose == false then
-			MacUI:Destroy()
-			return
+	local LightActions = {
+		Close = function()
+			if config.ConfirmClose == false then
+				MacUI:Destroy()
+				return
+			end
+			Window:Dialog({
+				Title = "Close " .. Window.Title .. "?",
+				Content = "This unloads the interface. Your scripts keep running until you rejoin.",
+				Icon = "power",
+				IconColor = rgb(255, 69, 58),
+				Buttons = {
+					{ Title = "Close", Style = "Destructive", Callback = function()
+						MacUI:Destroy()
+					end },
+					{ Title = "Cancel" },
+				},
+			})
+		end,
+		Minimize = function()
+			Window:Minimize()
+		end,
+		Zoom = function()
+			Window:SetMaximized(not Window.Maximized)
+		end,
+	}
+	for name, action in pairs(LightActions) do
+		LightButtons[name].MouseButton1Click:Connect(action)
+		if LightTargets[name] then
+			LightTargets[name].MouseButton1Click:Connect(action)
 		end
-		Window:Dialog({
-			Title = "Close " .. Window.Title .. "?",
-			Content = "This unloads the interface. Your scripts keep running until you rejoin.",
-			Icon = "power",
-			IconColor = rgb(255, 69, 58),
-			Buttons = {
-				{ Title = "Close", Style = "Destructive", Callback = function()
-					MacUI:Destroy()
-				end },
-				{ Title = "Cancel" },
-			},
-		})
-	end)
-	LightButtons.Minimize.MouseButton1Click:Connect(function()
-		Window:Minimize()
-	end)
-	LightButtons.Zoom.MouseButton1Click:Connect(function()
-		Window:SetMaximized(not Window.Maximized)
-	end)
+	end
 
 	Dock.MouseEnter:Connect(function()
 		DockTip.Visible = true
@@ -10903,17 +11049,17 @@ function MacUI:CreateWindow(config)
 			local dragging
 			header.InputBegan:Connect(function(input)
 				if IsPointer(input) then
-					dragging = { Start = input.Position, Position = holder.Position }
+					dragging = { Start = input.Position, Position = holder.Position, Input = input }
 				end
 			end)
 			Connect(UserInputService.InputChanged, function(input)
-				if dragging and IsMove(input) then
+				if dragging and DragMoves(dragging.Input, input) then
 					local delta = input.Position - dragging.Start
 					holder.Position = dragging.Position + UDim2.fromOffset(delta.X, delta.Y)
 				end
 			end)
 			Connect(UserInputService.InputEnded, function(input)
-				if IsPointer(input) then
+				if dragging and DragEnds(dragging.Input, input) then
 					dragging = nil
 				end
 			end)
@@ -10996,6 +11142,7 @@ function MacUI:CreateWindow(config)
 	end)
 
 	Connect(ScreenGui:GetPropertyChangedSignal("AbsoluteSize"), function()
+		FitToScreen() -- a rotated phone, a resized game window
 		if Window.Maximized then
 			local viewport = ScreenGui.AbsoluteSize
 			Window.Size = Vector2.new((viewport.X - 24) / Window.Scale, (viewport.Y - 24) / Window.Scale)
@@ -11044,6 +11191,7 @@ function MacUI:CreateWindow(config)
 			Dim = spec.Dim,
 		})
 		Window.Loader = loader
+		Window.Loading = true
 		local finished = false
 		function Window:FinishLoading(text)
 			if finished then
@@ -11052,8 +11200,18 @@ function MacUI:CreateWindow(config)
 			finished = true
 			loader:Finish(text)
 			task.delay(0.4, function()
-				if not MacUI.Unloaded then
+				Window.Loading = false
+				if not MacUI.Unloaded and not Window.Minimized then
 					Window:SetVisible(true)
+				end
+			end)
+		end
+		if spec.Duration == false then
+			-- if the script stops (an error) before FinishLoading, don't leave
+			-- the screen dimmed forever
+			task.delay(tonumber(spec.Timeout) or 30, function()
+				if not finished and not MacUI.Unloaded then
+					Window:FinishLoading()
 				end
 			end)
 		end
