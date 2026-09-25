@@ -26,6 +26,8 @@ local MacUI = {
 	MonoFamily = "rbxasset://fonts/families/RobotoMono.json",
 	ReduceMotion = false,
 	UndoEnabled = true,
+	-- when this copy loaded: re-running a script keeps the newest copy
+	LoadedAt = os.clock(),
 }
 MacUI.Flags = MacUI.Options
 
@@ -398,9 +400,47 @@ local KeyCapture = { Active = false, Token = 0, EndedAt = -1 }
 -- whether a press that began on it is still held. Only that counts as the
 -- user's own change for undo, macros and suggestions: walking, turning the
 -- camera or a script acting on its own doesn't.
-local Activity = { Last = -1, Pressing = false }
+local Activity = { Last = -1, Pressing = nil }
 local function MarkActivity()
 	Activity.Last = os.clock()
+end
+
+-- The GUI objects that make up the interface (windows, open menus, banners,
+-- the dock...). Presses elsewhere, like the game's own buttons or the mobile
+-- thumbstick, aren't the user using the interface.
+local InterfaceRoots = setmetatable({}, { __mode = "k" })
+
+local function OverInterface(position)
+	for root in pairs(InterfaceRoots) do
+		if root.Parent and root.Visible then
+			local layer = root:FindFirstAncestorOfClass("ScreenGui")
+			local corner, size = root.AbsolutePosition, root.AbsoluteSize
+			if
+				(not layer or layer.Enabled)
+				and position.X >= corner.X
+				and position.X <= corner.X + size.X
+				and position.Y >= corner.Y
+				and position.Y <= corner.Y + size.Y
+			then
+				return true
+			end
+		end
+	end
+	return false
+end
+
+-- Typing in one of the interface's own text fields (not the chat).
+local function TypingInInterface()
+	local box = UserInputService:GetFocusedTextBox()
+	if not box then
+		return false
+	end
+	for root in pairs(InterfaceRoots) do
+		if box:IsDescendantOf(root) then
+			return true
+		end
+	end
+	return false
 end
 
 -- Records the next key press. `done(key)` receives a KeyCode name, "MB2"/"MB3"
@@ -427,6 +467,10 @@ local function CaptureKey(done, keyboardOnly)
 		end)
 	end
 	connection = UserInputService.InputBegan:Connect(function(input)
+		if MacUI.Unloaded then
+			Finish() -- unloaded while waiting: nothing to bind any more
+			return
+		end
 		local key
 		local kind = input.UserInputType
 		if kind == Enum.UserInputType.Keyboard then
@@ -1116,6 +1160,7 @@ function MacUI:Notify(config)
 		Size = UDim2.fromOffset(width, banner.Height),
 		Parent = NotificationGui,
 	})
+	InterfaceRoots[holder] = true
 	New("UIScale", { Scale = scale, Parent = holder })
 	-- no drop shadow: over the game it reads as a dark smudge; the hairline
 	-- border sets the banner apart
@@ -1410,6 +1455,7 @@ function MacUI:SetWatermark(options)
 		Size = UDim2.fromOffset(120, 28),
 		Parent = gui,
 	})
+	InterfaceRoots[holder] = true
 	New("UIScale", { Scale = NotificationScale(), Parent = holder })
 	-- no drop shadow: around a pill it reads as a dark smudge over the game
 	local body = New("Frame", {
@@ -1572,6 +1618,10 @@ local ActiveLoaders = {}
 
 function MacUI:ShowLoading(options)
 	options = options or {}
+	if self.Unloaded then
+		local function Nothing() end
+		return { Shown = false, Closed = true, SetProgress = Nothing, SetStatus = Nothing, Finish = Nothing, Close = Nothing }
+	end
 	local gui = New("ScreenGui", {
 		Name = "MacUI_Loading",
 		ResetOnSpawn = false,
@@ -2230,7 +2280,11 @@ end
 -- A connection that is cleaned up with the row.
 function RowMethods:Connect(signal, fn)
 	local connection = signal:Connect(fn)
-	table.insert(self.Connections, connection)
+	if MacUI.Unloaded then
+		connection:Disconnect() -- this copy was replaced while it was building
+	else
+		table.insert(self.Connections, connection)
+	end
 	return connection
 end
 
@@ -2995,9 +3049,10 @@ local function RestoreSnapshot(element, snapshot)
 end
 
 -- The user is using the interface: they clicked or typed in it a moment ago,
--- or are still holding a press that began on it (see Activity).
+-- or are still holding a press that began on it (see Activity). The moment is
+-- short, so a script's own change right after a click isn't taken for theirs.
 local function UserActive()
-	return os.clock() - Activity.Last < 0.5 or Activity.Pressing
+	return os.clock() - Activity.Last < 0.25 or Activity.Pressing ~= nil
 end
 
 local function RecordChange(element, before, after)
@@ -3237,26 +3292,40 @@ end
 -- clicked or typed, and handles Ctrl/Cmd + Z, Ctrl/Cmd + Shift + Z and Ctrl + Y.
 local LibraryConnections = {}
 local function EnsureLibraryInput()
-	if #LibraryConnections > 0 then
+	if #LibraryConnections > 0 or MacUI.Unloaded then
 		return
 	end
 	local POINTERS = {
 		[Enum.UserInputType.MouseButton1] = true,
 		[Enum.UserInputType.Touch] = true,
 	}
+	local function AnyWindowShown()
+		for _, window in ipairs(MacUI.Windows) do
+			if window.Shown and not window.Minimized then
+				return true
+			end
+		end
+		return false
+	end
 	table.insert(LibraryConnections, UserInputService.InputBegan:Connect(function(input, processed)
 		local kind = input.UserInputType
-		-- only input the interface took: clicks on it and typing in its fields
-		if processed and (POINTERS[kind] or kind == Enum.UserInputType.MouseButton2 or kind == Enum.UserInputType.Keyboard) then
-			MarkActivity()
-			if POINTERS[kind] then
-				Activity.Pressing = true
+		-- only input the interface took: presses on its own GUI and typing in
+		-- its own fields (not the game's buttons, the thumbstick or the chat)
+		if POINTERS[kind] or kind == Enum.UserInputType.MouseButton2 then
+			if processed and OverInterface(input.Position) then
+				MarkActivity()
+				if POINTERS[kind] then
+					Activity.Pressing = input
+				end
 			end
+		elseif kind == Enum.UserInputType.Keyboard and processed and TypingInInterface() then
+			MarkActivity()
 		end
 		if input.KeyCode ~= Enum.KeyCode.Z and input.KeyCode ~= Enum.KeyCode.Y then
 			return
 		end
-		if processed or KeyCapture.Active or MacUI.Unloaded or UserInputService:GetFocusedTextBox() or not CommandKeyDown() then
+		-- undo only while a window is showing: a hidden change is a surprise
+		if processed or KeyCapture.Active or MacUI.Unloaded or UserInputService:GetFocusedTextBox() or not CommandKeyDown() or not AnyWindowShown() then
 			return
 		end
 		local shift = UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) or UserInputService:IsKeyDown(Enum.KeyCode.RightShift)
@@ -3268,8 +3337,9 @@ local function EnsureLibraryInput()
 		end
 	end))
 	table.insert(LibraryConnections, UserInputService.InputEnded:Connect(function(input)
-		if Activity.Pressing and POINTERS[input.UserInputType] then
-			Activity.Pressing = false
+		local pressing = Activity.Pressing
+		if pressing and (input == pressing or (input.UserInputType == pressing.UserInputType and input.UserInputType ~= Enum.UserInputType.Touch)) then
+			Activity.Pressing = nil
 			MarkActivity() -- a slider that reports on release does so now
 		end
 	end))
@@ -4248,6 +4318,9 @@ function Container:AddInput(idx, info)
 	end
 
 	box:GetPropertyChangedSignal("Text"):Connect(function()
+		if box:IsFocused() then
+			MarkActivity() -- the user typing
+		end
 		if Input.Numeric then
 			local cleaned = box.Text:gsub("[^%d%.%-]", "")
 			if cleaned ~= box.Text then
@@ -6943,9 +7016,17 @@ function MacUI:CreateWindow(config)
 		local key = tostring(config.Title)
 		local previous = registry[key]
 		if previous and previous ~= self and not previous.Unloaded then
-			pcall(previous.Destroy, previous)
+			if (previous.LoadedAt or 0) > (self.LoadedAt or 0) then
+				-- a newer copy of this script is already running: this older
+				-- one (it was still loading) steps aside
+				pcall(self.Destroy, self)
+			else
+				pcall(previous.Destroy, previous)
+			end
 		end
-		registry[key] = self
+		if not self.Unloaded then
+			registry[key] = self
+		end
 	end
 	if config.Theme and self.Themes[config.Theme] then
 		self:SetTheme(config.Theme, true)
@@ -6988,7 +7069,11 @@ function MacUI:CreateWindow(config)
 
 	local function Connect(signal, fn)
 		local connection = signal:Connect(fn)
-		table.insert(Window.Connections, connection)
+		if MacUI.Unloaded then
+			connection:Disconnect() -- this copy was replaced while it was building
+		else
+			table.insert(Window.Connections, connection)
+		end
 		return connection
 	end
 
@@ -6998,8 +7083,18 @@ function MacUI:CreateWindow(config)
 		DisplayOrder = config.DisplayOrder or 100,
 		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
 	})
-	ParentGui(ScreenGui)
+	if not MacUI.Unloaded then
+		ParentGui(ScreenGui)
+	end
 	Window.ScreenGui = ScreenGui
+	-- the game (or an anti-cheat) removed the window: unload properly
+	ScreenGui.Destroying:Connect(function()
+		if not MacUI.Unloaded then
+			task.defer(function()
+				MacUI:Destroy()
+			end)
+		end
+	end)
 
 	-- Root: positioned & scaled container; Holder: the visible window.
 	local Root = New("Frame", {
@@ -7012,6 +7107,7 @@ function MacUI:CreateWindow(config)
 	})
 	local RootScale = New("UIScale", { Scale = 1, Parent = Root })
 	local ScaleTween
+	InterfaceRoots[Root] = true
 
 	-- The scale currently applied on screen (differs from Window.Scale mid-animation).
 	function Window:GetAbsoluteScale()
@@ -7649,6 +7745,7 @@ function MacUI:CreateWindow(config)
 		Parent = ScreenGui,
 	})
 	local DockScale = New("UIScale", { Scale = 1, Parent = Dock })
+	InterfaceRoots[Dock] = true
 	local DockBody = New("Frame", {
 		Name = "Body",
 		Size = UDim2.fromScale(1, 1),
@@ -7780,6 +7877,9 @@ function MacUI:CreateWindow(config)
 			ZIndex = 2,
 			Parent = PopupLayer,
 		})
+		-- while a popover is open, a press anywhere is on the interface
+		InterfaceRoots[popup.Catcher] = true
+		InterfaceRoots[popup.Holder] = true
 		popup.Scale = New("UIScale", { Scale = scale * 0.96, Parent = popup.Holder })
 		-- Frames don't sink clicks; without this the dismiss catcher underneath
 		-- would close the popover when clicking its background or colour square.
@@ -10166,6 +10266,7 @@ function MacUI:CreateWindow(config)
 			ZIndex = 300,
 			Parent = PopupLayer,
 		})
+		InterfaceRoots[overlay] = true
 		-- centred over the window, just under its toolbar, kept on screen
 		local screen = PopupLayer.AbsoluteSize
 		local rootPosition = Root.AbsolutePosition - PopupLayer.AbsolutePosition
@@ -10499,6 +10600,7 @@ function MacUI:CreateWindow(config)
 				return
 			end
 			if enterPressed then
+				MarkActivity() -- Enter in Spotlight is the user acting
 				local entry = items[selected] and items[selected].Entry
 				if entry then
 					local reveal = UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) or UserInputService:IsKeyDown(Enum.KeyCode.RightShift)
@@ -10752,6 +10854,7 @@ function MacUI:CreateWindow(config)
 				Parent = ScreenGui,
 			})
 			local listScale = New("UIScale", { Scale = Window.Scale, Parent = holder })
+			InterfaceRoots[holder] = true
 			local body = New("Frame", {
 				Name = "Body",
 				Size = UDim2.fromScale(1, 1),
@@ -10996,8 +11099,10 @@ function MacUI:Destroy()
 		return
 	end
 	self.Unloaded = true
+	-- each runs until it first waits, so a slow one can't hold up the
+	-- teardown (or a re-run of the script that is replacing this copy)
 	for _, fn in ipairs(UnloadCallbacks) do
-		SafeCall(fn)
+		task.spawn(SafeCall, fn)
 	end
 	for _, window in ipairs(self.Windows) do
 		if window._ClosePopup then
@@ -11036,6 +11141,14 @@ function MacUI:Destroy()
 	end
 	table.clear(ActiveTimers)
 	Macros.Recorder = nil
+	Activity.Pressing = nil
+	if type(shared) == "table" and type(shared.__MacUIWindows) == "table" then
+		for key, library in pairs(shared.__MacUIWindows) do
+			if library == self then
+				shared.__MacUIWindows[key] = nil
+			end
+		end
+	end
 	if Guard.Connection then
 		Guard.Connection:Disconnect()
 		Guard.Connection = nil
@@ -11044,6 +11157,7 @@ function MacUI:Destroy()
 	table.clear(ThemeRegistry)
 	table.clear(FontRegistry)
 	table.clear(self.Options)
+	table.clear(self.Windows)
 end
 MacUI.Unload = MacUI.Destroy
 
