@@ -131,13 +131,13 @@ local Window = MacUI:CreateWindow({
     ReplaceExisting = true,         -- re-running the script closes the old window
     Scale = nil,                    -- fixed UI scale; nil picks one to fit the screen
     Undo = true,                    -- Ctrl/Cmd + Z undoes the user's last change
-    Loading = false,                -- true, or { Title, Subtitle, Icon, Duration = seconds | false }
+    Loading = false,                -- true, or { Title, Subtitle, Icon, Duration = seconds | false, Timeout = 30 }
     Watermark = false,              -- true, or the options of MacUI:SetWatermark
     PerformanceGuard = false,       -- pause blur and animations while the game runs slowly
 })
 ```
 
-With `Loading`, the window stays hidden behind a loading card while your script adds its tabs, then opens by itself after `Duration` seconds (1.4 by default). With `Duration = false`, drive the bar yourself and open the window when you're ready:
+With `Loading`, the window stays hidden behind a loading card while your script adds its tabs, then opens by itself after `Duration` seconds (1.4 by default). The show/hide key waits until then. With `Duration = false`, drive the bar yourself and open the window when you're ready (if your script never does, the card closes after `Timeout` seconds):
 
 ```lua
 local Window = MacUI:CreateWindow({ Title = "My Hub", Loading = { Subtitle = "Fetching data…", Duration = false } })
@@ -170,6 +170,8 @@ Window:FinishLoading("Ready")
 
 Tabs have `Tab:SetBadge(number | text | nil)`, `Tab:SetTitle(text)` and `Tab:Select()`.
 
+**Small screens and phones.** The window always fits on screen. On a small screen it gets smaller before its text does, and on a phone the text never goes below 85%. A size saved on a bigger screen, a rotated phone or a resized game window shrinks it and keeps it in view, and it grows back to the size you asked for when there's room. In a narrow window, a control too wide to sit beside its title moves under it. On a phone, the traffic lights and resize corner get finger-sized targets, a button replaces the Ctrl K hint, and keyboard shortcuts are hidden. A drag follows the finger that started it, so the movement thumbstick never moves a slider or the window. While the window is open, the mouse is free in first-person and shift-lock games.
+
 ## Sections
 
 ```lua
@@ -186,7 +188,7 @@ Advanced:SetCollapsed(false)   -- click the title to fold it; search results and
 
 ## Elements
 
-Each element takes an optional index as its first argument, just like Fluent. Elements that have an index are stored in `MacUI.Options[index]` and are picked up by SaveManager.
+Each element takes an optional index as its first argument, just like Fluent. Elements that have an index are stored in `MacUI.Options[index]` and are picked up by SaveManager. As in Fluent, toggles, checkboxes, sliders, steppers and progress bars also run their callback once when they're created, with the default value, so your script starts in step with the interface. The other elements run it only when their value changes.
 
 ```lua
 -- Switch (Style = "Checkbox" or AddCheckbox for a checkbox)
@@ -227,7 +229,7 @@ local Status = Section:AddLabel("Status", { Title = "Status", Description = "…
 Section:AddParagraph({ Title = "About", Content = "Longer text, <b>rich text</b> supported." })
 local Bar = Section:AddProgress("Quest", { Title = "Quest progress", Max = 25, Default = 0 })         -- Bar:SetValue(10)
 Section:AddCode({ Title = "Loader", Code = 'loadstring(game:HttpGet("…"))()' })                     -- with a copy button
-Section:AddImage({ Title = "Map", Image = "rbxassetid://…", Height = 150, ScaleType = "Crop" })
+Section:AddImage({ Title = "Map", Image = "rbxassetid://…", Height = 150, ScaleType = "Crop" })   -- or an icon name, tinted to the theme (ImageColor to choose)
 
 -- Live bar graph: shows the latest value and the average. Min/Max fix the scale (automatic otherwise).
 local Fps = Section:AddGraph("Fps", { Title = "Frame rate", Points = 40, Min = 0, Suffix = " fps", Height = 76 })

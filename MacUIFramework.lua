@@ -124,6 +124,8 @@ MacUI.Themes = {
 		HoverTransparency = 0.94,
 		Menu = rgb(42, 42, 45),
 		MenuStroke = rgb(70, 70, 75),
+		Hud = rgb(58, 58, 62),
+		HudStroke = rgb(84, 84, 90),
 		Scrollbar = rgb(122, 122, 128),
 		Shadow = rgb(0, 0, 0),
 		ShadowTransparency = 0.3,
@@ -166,6 +168,8 @@ MacUI.Themes = {
 		HoverTransparency = 0.95,
 		Menu = rgb(249, 249, 251),
 		MenuStroke = rgb(206, 206, 212),
+		Hud = rgb(236, 236, 240),
+		HudStroke = rgb(196, 196, 202),
 		Scrollbar = rgb(150, 150, 156),
 		Shadow = rgb(0, 0, 0),
 		ShadowTransparency = 0.55,
@@ -208,6 +212,8 @@ MacUI.Themes = {
 		HoverTransparency = 0.94,
 		Menu = rgb(26, 26, 28),
 		MenuStroke = rgb(56, 56, 60),
+		Hud = rgb(40, 40, 44),
+		HudStroke = rgb(66, 66, 72),
 		Scrollbar = rgb(110, 110, 116),
 		Shadow = rgb(0, 0, 0),
 		ShadowTransparency = 0.25,
@@ -1200,7 +1206,7 @@ function MacUI:Notify(config)
 		Parent = card,
 	})
 	Corner(border, 15)
-	Stroke(border, "MenuStroke", 1, 0.2)
+	Stroke(border, "HudStroke", 1, 0)
 
 	local content = New("Frame", {
 		Name = "Content",
@@ -1493,7 +1499,7 @@ function MacUI:SetWatermark(options)
 		Parent = holder,
 	})
 	Corner(body, 14)
-	Stroke(body, "MenuStroke", 1, 0.1)
+	Stroke(body, "HudStroke", 1, 0)
 	IconTile(body, options.Icon or "command", ResolveColor(options.IconColor) or function()
 		return MacUI.Accent
 	end, 18, 5, 12, {
@@ -1667,7 +1673,7 @@ function MacUI:ShowLoading(options)
 		BackgroundTransparency = 1,
 		AnchorPoint = Vector2.new(0.5, 0.5),
 		Position = UDim2.fromScale(0.5, 0.5),
-		Size = UDim2.fromOffset(300, 214),
+		Size = UDim2.fromOffset(300, 200),
 		ZIndex = 2,
 		Parent = gui,
 	})
@@ -2111,11 +2117,12 @@ local function CreateRow(container, info, options)
 		Parent = row.Content,
 	})
 	List(row.Stack, nil, 2)
+	row.TitleWeight = options.TitleWeight or Enum.FontWeight.Regular
 	row.TitleLabel = New("TextLabel", {
 		Name = "Title",
 		Text = row.Title,
 		TextSize = 14,
-		Weight = options.TitleWeight or Enum.FontWeight.Regular,
+		Weight = row.TitleWeight,
 		Size = UDim2.new(1, 0, 0, 18),
 		TextTruncate = Enum.TextTruncate.AtEnd,
 		LayoutOrder = 1,
@@ -2156,6 +2163,15 @@ local function CreateRow(container, info, options)
 	row.Accessory:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
 		row:_UpdateReserve()
 	end)
+	-- (and when the window's width changes)
+	local lastWidth = 0
+	row.Frame:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+		local width = row.Frame.AbsoluteSize.X
+		if width ~= lastWidth then
+			lastWidth = width
+			row:_UpdateReserve()
+		end
+	end)
 
 	-- Right-click (or long-press on touch) opens the row's context menu.
 	row:Connect(row.Frame.InputBegan, function(input)
@@ -2189,12 +2205,64 @@ local function CreateRow(container, info, options)
 	return row
 end
 
-function RowMethods:_UpdateReserve()
-	local width = self.Accessory.AbsoluteSize.X / self.Window:GetAbsoluteScale()
-	if self.FullWidthText then
-		width = 0
+-- Moves the row's control under its title and back.
+function RowMethods:_WrapAccessory(wrap)
+	if (self.Wrapped == true) == wrap then
+		return
 	end
-	self.Stack.Size = UDim2.new(1, -(width > 1 and width + 14 or 0), 0, 0)
+	self.Wrapped = wrap
+	local accessory = self.Accessory
+	if wrap then
+		if not self.WrapGap then
+			self.WrapGap = New("Frame", {
+				Name = "WrapGap",
+				BackgroundTransparency = 1,
+				Size = UDim2.new(1, 0, 0, 4),
+				LayoutOrder = 9,
+			})
+		end
+		self.WrapGap.Parent = self.Stack
+		accessory.AnchorPoint = Vector2.zero
+		accessory.Position = UDim2.new()
+		accessory.LayoutOrder = 10
+		accessory.Parent = self.Stack
+	else
+		if self.WrapGap then
+			self.WrapGap.Parent = nil
+		end
+		accessory.AnchorPoint = Vector2.new(1, 0.5)
+		accessory.Position = UDim2.new(1, -12, 0.5, 0)
+		accessory.Parent = self.Frame
+	end
+end
+
+function RowMethods:_UpdateReserve()
+	local scale = self.Window:GetAbsoluteScale()
+	local width = self.Accessory.AbsoluteSize.X / scale
+	if self.FullWidthText then
+		self.Stack.Size = UDim2.new(1, 0, 0, 0)
+		return
+	end
+	-- A control too wide to sit beside the title (a segmented picker in a
+	-- narrow window) moves under it rather than squeezing the title away.
+	local room = self.Frame.AbsoluteSize.X / scale - 24
+	if room > 0 and width > 1 and not self.NoWrap then
+		if not self.TextWidth then
+			local description = (self.Description:gsub("<[^>]->", ""))
+			self.TextWidth = math.max(
+				math.ceil(MeasureText(self.Title, 14, self.TitleWeight)),
+				description ~= "" and math.ceil(MeasureText(description, self.DescLabel.TextSize)) or 0
+			)
+		end
+		-- the title and description need their width, or 40% of the row if
+		-- they're longer (they wrap then, in a column that's still readable)
+		self:_WrapAccessory(room - width - 14 < math.min(self.TextWidth + 4, room * 0.4))
+	end
+	if self.Wrapped then
+		self.Stack.Size = UDim2.new(1, 0, 0, 0)
+	else
+		self.Stack.Size = UDim2.new(1, -(width > 1 and width + 14 or 0), 0, 0)
+	end
 end
 
 function RowMethods:_UpdateLayout()
@@ -2215,13 +2283,17 @@ end
 function RowMethods:SetTitle(text)
 	self.Title = tostring(text or "")
 	self.TitleLabel.Text = self.Title
+	self.TextWidth = nil
 	self:_UpdateLayout()
+	self:_UpdateReserve()
 end
 
 function RowMethods:SetDesc(text)
 	self.Description = tostring(text or "")
 	self.DescLabel.Text = self.Description
+	self.TextWidth = nil
 	self:_UpdateLayout()
+	self:_UpdateReserve()
 end
 
 function RowMethods:_Matches(query)
@@ -2351,6 +2423,20 @@ function RowMethods:_BindContext(button)
 	end)
 end
 
+-- No separator first, last or twice in a row.
+local function TidySeparators(items)
+	local tidy = {}
+	for _, item in ipairs(items) do
+		if item ~= "-" or (#tidy > 0 and tidy[#tidy] ~= "-") then
+			table.insert(tidy, item)
+		end
+	end
+	if tidy[#tidy] == "-" then
+		table.remove(tidy)
+	end
+	return tidy
+end
+
 function RowMethods:_ContextItems()
 	local element = self.Element
 	local items = {}
@@ -2426,7 +2512,7 @@ function RowMethods:_ContextItems()
 			table.insert(items, item)
 		end
 	end
-	if element._Activate then
+	if element._Activate and not TouchOnly() then
 		table.insert(items, "-")
 		table.insert(items, {
 			Text = element.Shortcut and "Change Shortcut…" or "Add Shortcut…",
@@ -2469,13 +2555,7 @@ function RowMethods:_ContextItems()
 			})
 		end
 	end
-	while items[1] == "-" do
-		table.remove(items, 1)
-	end
-	while items[#items] == "-" do
-		table.remove(items)
-	end
-	return items
+	return TidySeparators(items)
 end
 
 function RowMethods:_OpenContextMenu(point)
@@ -2499,7 +2579,7 @@ end
 function RowMethods:_RenderShortcut()
 	local element = self.Element
 	local key = element and element.Shortcut
-	local show = key ~= nil or self.RecordingShortcut == true
+	local show = (key ~= nil or self.RecordingShortcut == true) and not TouchOnly()
 	if show and not self.ShortcutCap then
 		local cap = New("TextButton", {
 			Name = "Shortcut",
@@ -3429,7 +3509,12 @@ function PushButton(parent, text, style, height)
 		Parent = button.Instance,
 	})
 	button.Stroke = Stroke(button.Instance, function(t)
-		return button.Style == "Default" and t.ControlStroke or Darken(MacUI.Accent, 0.2)
+		if button.Style == "Primary" then
+			return Darken(MacUI.Accent, 0.2)
+		elseif button.Style == "Destructive" then
+			return Darken(t.Destructive, 0.2)
+		end
+		return t.ControlStroke
 	end, 1, 0.35)
 	button.Instance.MouseEnter:Connect(function()
 		button.Hovered = true
@@ -3491,6 +3576,7 @@ end
 function Container:AddLabel(idx, info)
 	idx, info = ParseArgs(idx, info)
 	local row = CreateRow(self, info)
+	row.NoWrap = true -- (the value caps its own width instead)
 	local Label = NewElement("Label", row, info)
 	Label.Value = tostring(info.Value or info.Text or "")
 
@@ -4755,7 +4841,7 @@ function Container:AddColorpicker(idx, info)
 				TextSize = 11,
 				Weight = Enum.FontWeight.Medium,
 				TextXAlignment = Enum.TextXAlignment.Right,
-				Theme = { TextColor3 = "Tertiary" },
+				Theme = { TextColor3 = "SubText" },
 				Parent = hexField,
 			})
 			local presets = New("Frame", {
@@ -5385,16 +5471,17 @@ function Container:AddCode(idx, info)
 	})
 	Corner(frame, 8)
 	Stroke(frame, "FieldStroke")
-	Padding(frame, 10, 40, 10, 12)
+	Padding(frame, 8, 40, 8, 12)
+	-- at least as tall as the copy button, so one line sits in the middle
 	local source = New("TextLabel", {
 		Name = "Source",
 		Text = Code.Value,
 		TextSize = 12,
 		FontFace = Font.new(MacUI.MonoFamily),
-		Size = UDim2.new(1, 0, 0, 0),
+		Size = UDim2.new(1, 0, 0, 24),
 		AutomaticSize = Enum.AutomaticSize.Y,
 		TextWrapped = true,
-		TextYAlignment = Enum.TextYAlignment.Top,
+		TextYAlignment = Enum.TextYAlignment.Center,
 		Theme = { TextColor3 = "Text" },
 		Parent = frame,
 	})
@@ -5404,8 +5491,8 @@ function Container:AddCode(idx, info)
 	local copy = New("TextButton", {
 		Name = "Copy",
 		AnchorPoint = Vector2.new(1, 0),
-		Position = UDim2.new(1, 34, 0, -5),
-		Size = UDim2.fromOffset(26, 26),
+		Position = UDim2.new(1, 33, 0, 0),
+		Size = UDim2.fromOffset(24, 24),
 		Theme = {
 			BackgroundColor3 = "Hover",
 			BackgroundTransparency = function(t)
@@ -5477,22 +5564,44 @@ function Container:AddImage(idx, info)
 	row:_UpdateLayout()
 	row:_UpdateReserve()
 	local ImageElement = NewElement("Image", row, info)
+	-- The icon set's glyphs are white: tint them (ImageColor, or the text
+	-- colour) so they show on a light theme too. Pictures keep their colours.
+	local tint = ResolveColor(info.ImageColor)
+	local isIcon = false
+	local function ResolveImage(value)
+		local asset = MacUI:GetIcon(value) or tostring(value or "")
+		isIcon = false
+		for _, id in pairs(Icons) do
+			if id == asset then
+				isIcon = true
+				break
+			end
+		end
+		return asset
+	end
 	local image = New("ImageLabel", {
 		Name = "Image",
-		Image = MacUI:GetIcon(info.Image) or tostring(info.Image or ""),
+		Image = ResolveImage(info.Image),
 		Size = UDim2.new(1, 0, 0, info.Height or 150),
 		ScaleType = ResolveScaleType(info.ScaleType),
 		BackgroundTransparency = 0,
 		LayoutOrder = -2,
-		Theme = { BackgroundColor3 = "Field" },
+		Theme = {
+			BackgroundColor3 = "Field",
+			ImageColor3 = function(t)
+				return tint or (isIcon and t.Text) or Color3.new(1, 1, 1)
+			end,
+		},
 		Parent = row.Stack,
 	})
 	Corner(image, 8)
+	Stroke(image, "FieldStroke")
 	if row.Title ~= "" or row.Description ~= "" then
 		New("Frame", { Name = "Gap", BackgroundTransparency = 1, Size = UDim2.new(1, 0, 0, 4), LayoutOrder = -1, Parent = row.Stack })
 	end
 	function ImageElement:SetImage(value)
-		image.Image = MacUI:GetIcon(value) or tostring(value or "")
+		image.Image = ResolveImage(value)
+		Restyle(image, 0)
 	end
 	function ImageElement:SetHeight(height)
 		image.Size = UDim2.new(1, 0, 0, height)
@@ -5558,7 +5667,7 @@ function Container:AddGraph(idx, info)
 		Position = UDim2.new(1, -10, 0, 4),
 		Size = UDim2.new(0.5, -10, 0, 16),
 		TextXAlignment = Enum.TextXAlignment.Right,
-		Theme = { TextColor3 = "Tertiary" },
+		Theme = { TextColor3 = "SubText" },
 		Parent = chart,
 	})
 	local plot = New("Frame", {
@@ -5774,7 +5883,7 @@ function Container:AddTable(idx, info)
 		TextXAlignment = Enum.TextXAlignment.Center,
 		Size = UDim2.new(1, 0, 0, rowHeight),
 		LayoutOrder = 0,
-		Theme = { TextColor3 = "Tertiary" },
+		Theme = { TextColor3 = "SubText" },
 		Parent = body,
 	})
 
@@ -7562,7 +7671,7 @@ function MacUI:CreateWindow(config)
 		TextSize = 15,
 		Weight = Enum.FontWeight.Bold,
 		Size = UDim2.fromOffset(0, 18),
-		AutomaticSize = Enum.AutomaticSize.X,
+		TextTruncate = Enum.TextTruncate.AtEnd,
 		LayoutOrder = 1,
 		Theme = { TextColor3 = "Text" },
 		Parent = TitleStack,
@@ -7572,7 +7681,7 @@ function MacUI:CreateWindow(config)
 		Text = Window.SubTitle,
 		TextSize = 12,
 		Size = UDim2.fromOffset(0, 15),
-		AutomaticSize = Enum.AutomaticSize.X,
+		TextTruncate = Enum.TextTruncate.AtEnd,
 		LayoutOrder = 2,
 		Visible = Window.SubTitle ~= "",
 		Theme = { TextColor3 = "SubText" },
@@ -7592,6 +7701,36 @@ function MacUI:CreateWindow(config)
 	})
 	Corner(Search, 7)
 	local SearchStroke = Stroke(Search, "Accent", 3, 1)
+
+	-- The title and subtitle take the room between the navigation buttons and
+	-- the search field, and end in "…" when a narrow window can't fit them.
+	local titleWidths = {}
+	local function FitTitles()
+		local scale = RootScale.Scale
+		local toolbarWidth = Toolbar.AbsoluteSize.X / scale
+		if toolbarWidth < 1 or scale <= 0 then
+			return
+		end
+		if titleWidths.Text ~= TitleLabel.Text or titleWidths.SubText ~= SubtitleLabel.Text then
+			titleWidths.Text, titleWidths.SubText = TitleLabel.Text, SubtitleLabel.Text
+			titleWidths.Title = math.ceil(MeasureText(TitleLabel.Text, 15, Enum.FontWeight.Bold)) + 2
+			titleWidths.Subtitle = math.ceil(MeasureText(SubtitleLabel.Text, 12)) + 2
+		end
+		local left = (TitleStack.AbsolutePosition.X - Toolbar.AbsolutePosition.X) / scale
+		-- in a narrow window the search field gives up some width first
+		local searchWidth = math.clamp(toolbarWidth - left - 26 - 120, math.min(120, SearchWidth), SearchWidth)
+		if Search.Size.X.Offset ~= searchWidth then
+			Search.Size = UDim2.fromOffset(searchWidth, 28)
+		end
+		local right = Search.Visible and (searchWidth + 14 + 12) or 14
+		local room = math.max(toolbarWidth - left - right, 0)
+		TitleLabel.Size = UDim2.fromOffset(math.min(titleWidths.Title, room), 18)
+		SubtitleLabel.Size = UDim2.fromOffset(math.min(titleWidths.Subtitle, room), 15)
+	end
+	Toolbar:GetPropertyChangedSignal("AbsoluteSize"):Connect(FitTitles)
+	TitleStack:GetPropertyChangedSignal("AbsolutePosition"):Connect(FitTitles)
+	Search:GetPropertyChangedSignal("AbsoluteSize"):Connect(FitTitles)
+	FitTitles()
 	IconImage({
 		Icon = "search",
 		IconSize = 14,
@@ -7829,7 +7968,7 @@ function MacUI:CreateWindow(config)
 		Parent = Dock,
 	})
 	Corner(DockBody, 18)
-	Stroke(DockBody, "MenuStroke", 1, 0.2)
+	Stroke(DockBody, "HudStroke", 1, 0)
 	IconTile(DockBody, config.Icon or "command", ResolveColor(config.IconColor) or function()
 		return MacUI.Accent
 	end, 48, 12, 26, {
@@ -7861,7 +8000,7 @@ function MacUI:CreateWindow(config)
 	})
 	Corner(DockTip, 6)
 	Padding(DockTip, 0, 10, 0, 10)
-	Stroke(DockTip, "MenuStroke", 1, 0.2)
+	Stroke(DockTip, "HudStroke", 1, 0)
 
 	----------------------------------------------------------------------------
 	-- Scale
@@ -8152,7 +8291,7 @@ function MacUI:CreateWindow(config)
 				TextXAlignment = Enum.TextXAlignment.Center,
 				Visible = #values == 0,
 				LayoutOrder = 100000,
-				Theme = { TextColor3 = "Tertiary" },
+				Theme = { TextColor3 = "SubText" },
 				Parent = listFrame,
 			})
 
@@ -8251,7 +8390,8 @@ function MacUI:CreateWindow(config)
 
 	-- Right-click menu. `items` are { Text, Icon?, Shortcut?, Disabled?, Destructive?, Callback } or "-".
 	function Window:_OpenContextMenu(point, items)
-		if not items or #items == 0 then
+		items = TidySeparators(items or {})
+		if #items == 0 then
 			return
 		end
 		local itemHeight, separatorHeight = 24, 9
@@ -8422,7 +8562,7 @@ function MacUI:CreateWindow(config)
 				Size = UDim2.fromScale(1, 1),
 				GroupTransparency = 1,
 				ZIndex = 2,
-				Theme = { BackgroundColor3 = "Menu" },
+				Theme = { BackgroundColor3 = "Hud" },
 				Parent = pill.Holder,
 			})
 			Corner(pill.Body, 16)
@@ -8434,7 +8574,7 @@ function MacUI:CreateWindow(config)
 				Parent = pill.Body,
 			})
 			Corner(border, 15)
-			Stroke(border, "MenuStroke", 1, 0.15)
+			Stroke(border, "HudStroke", 1, 0)
 			pill.Dot = New("Frame", {
 				Name = "Dot",
 				AnchorPoint = Vector2.new(0, 0.5),
@@ -8527,7 +8667,7 @@ function MacUI:CreateWindow(config)
 			Size = UDim2.fromScale(1, 1),
 			GroupTransparency = 1,
 			ZIndex = 2,
-			Theme = { BackgroundColor3 = "Menu" },
+			Theme = { BackgroundColor3 = "Hud" },
 			Parent = holder,
 		})
 		Corner(body, 20)
@@ -8539,7 +8679,7 @@ function MacUI:CreateWindow(config)
 			Parent = body,
 		})
 		Corner(border, 19)
-		Stroke(border, "MenuStroke", 1, 0.15)
+		Stroke(border, "HudStroke", 1, 0)
 		local content = New("Frame", {
 			BackgroundTransparency = 1,
 			Size = UDim2.fromScale(1, 1),
@@ -8658,7 +8798,7 @@ function MacUI:CreateWindow(config)
 			Size = UDim2.new(1, 0, 0, #Window.Tabs == 0 and TabOrder == 0 and 22 or 30),
 			TextYAlignment = Enum.TextYAlignment.Bottom,
 			LayoutOrder = NextTabOrder(),
-			Theme = { TextColor3 = "Tertiary" },
+			Theme = { TextColor3 = "SubText" },
 			Children = { New("UIPadding", { PaddingLeft = UDim.new(0, 8), PaddingBottom = UDim.new(0, 5) }) },
 			Parent = TabList,
 		})
@@ -9391,12 +9531,14 @@ function MacUI:CreateWindow(config)
 		Window.Title = tostring(text)
 		TitleLabel.Text = Window.Title
 		DockTip.Text = Window.Title
+		FitTitles()
 	end
 
 	function Window:SetSubtitle(text)
 		Window.SubTitle = tostring(text or "")
 		SubtitleLabel.Text = Window.SubTitle
 		SubtitleLabel.Visible = Window.SubTitle ~= ""
+		FitTitles()
 	end
 	Window.SetSubTitle = Window.SetSubtitle
 
@@ -10522,7 +10664,7 @@ function MacUI:CreateWindow(config)
 			TextXAlignment = Enum.TextXAlignment.Center,
 			Visible = false,
 			LayoutOrder = 100000,
-			Theme = { TextColor3 = "Tertiary" },
+			Theme = { TextColor3 = "SubText" },
 			Parent = listContent,
 		})
 
@@ -10619,7 +10761,7 @@ function MacUI:CreateWindow(config)
 						Size = UDim2.new(1, 0, 0, headerHeight),
 						TextYAlignment = Enum.TextYAlignment.Bottom,
 						LayoutOrder = order,
-						Theme = { TextColor3 = "Tertiary" },
+						Theme = { TextColor3 = "SubText" },
 						Parent = listContent,
 					})
 					Padding(heading, 0, 10, 6, 10)
@@ -10969,7 +11111,7 @@ function MacUI:CreateWindow(config)
 				Text = "Right-click a toggle to add one",
 				TextSize = 12,
 				Size = UDim2.new(1, 0, 0, 24),
-				Theme = { TextColor3 = "Tertiary" },
+				Theme = { TextColor3 = "SubText" },
 				Parent = ShortcutPanel.Rows,
 			})
 		end
@@ -11011,7 +11153,7 @@ function MacUI:CreateWindow(config)
 				Parent = holder,
 			})
 			Corner(body, 12)
-			Stroke(body, "MenuStroke", 1, 0.1)
+			Stroke(body, "HudStroke", 1, 0)
 			local header = New("Frame", {
 				Name = "Header",
 				BackgroundTransparency = 1,

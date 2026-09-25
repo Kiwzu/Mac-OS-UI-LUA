@@ -247,6 +247,7 @@ Numbers:AddSlider("DemoSlider", {
 	end,
 })
 Numbers:AddSlider("DemoDecimals", { Title = "Decimals", Description = "Rounding = 2", Min = 0, Max = 1, Default = 0.25, Rounding = 2 })
+local releaseReady = false
 Numbers:AddSlider("DemoFinished", {
 	Title = "Fires on release",
 	Description = "Finished = true: one callback per drag.",
@@ -256,9 +257,13 @@ Numbers:AddSlider("DemoFinished", {
 	Increment = 25,
 	Finished = true,
 	Callback = function(value)
-		Window:Toast("Released at", { Detail = tostring(value) })
+		-- callbacks also run once as the control is created, with its default
+		if releaseReady then
+			Window:Toast("Released at", { Detail = tostring(value) })
+		end
 	end,
 })
+releaseReady = true
 Numbers:AddStepper("DemoStepper", {
 	Title = "Stepper",
 	Description = "Hold − or + to repeat, or type a number.",
