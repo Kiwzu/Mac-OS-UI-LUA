@@ -62,23 +62,30 @@ local function Try(fn, ...)
 	return false, tostring(result)
 end
 
--- A profile name that works as a file name: no folders, none of the
--- characters Windows refuses, not too long.
+-- A profile name that works as a file name: whole UTF-8 characters, no
+-- folders, none of the characters Windows refuses, at most 60 characters.
 local function CleanName(name)
 	name = tostring(name or "")
+	if not utf8.len(name) then
+		local valid = {}
+		for char in name:gmatch(utf8.charpattern) do
+			if utf8.len(char) == 1 then
+				table.insert(valid, char)
+			end
+		end
+		name = table.concat(valid)
+	end
 	name = name:gsub("[%c\\/:%*%?\"<>|]", "")
-	name = name:gsub("%.%.+", ".")
 	name = name:gsub("^[%s%.]+", ""):gsub("[%s%.]+$", "")
-	if #name > 60 then
-		local ok, cut = pcall(utf8.offset, name, 61)
-		name = name:sub(1, (ok and cut or 61) - 1)
+	if utf8.len(name) > 60 then
+		name = name:sub(1, utf8.offset(name, 61) - 1):gsub("[%s%.]+$", "")
 	end
 	return name
 end
 
--- A name to read or delete: anything listed, but never a path.
+-- A name to read, overwrite or delete: anything listed, but never a path.
 local function SafeName(name)
-	if type(name) ~= "string" or name == "" or name:find("[\\/]") or name:find("%.%.") then
+	if type(name) ~= "string" or name == "" or name:find("[\\/]") then
 		return nil
 	end
 	return name
@@ -338,7 +345,15 @@ end
 -- Returns true and the name it was saved under (cleaned up to work as a
 -- file name), or false and a reason.
 function SaveManager:Save(name)
-	name = CleanName(name)
+	-- a profile that already exists keeps its name (older versions allowed a
+	-- trailing space, say); a new one gets a name that works as a file name
+	local existing = SafeName(name)
+	local keep = false
+	if existing and FileApi() then
+		local found, exists = Try(isfile, self.Folder .. "/settings/" .. existing .. ".json")
+		keep = found and exists
+	end
+	name = keep and existing or CleanName(name)
 	if name == "" then
 		return false, "no config name given"
 	end

@@ -2380,7 +2380,11 @@ function RowMethods:_UpdateReserve()
 	-- A control too wide to sit beside the title (a segmented picker in a
 	-- narrow window) moves under it rather than squeezing the title away.
 	local room = self.Frame.AbsoluteSize.X / scale - 24
-	if room > 0 and width > 1 and not self.NoWrap then
+	if self.NoWrap or (self.Title == "" and self.Description == "") then
+		-- (with no text there's nothing to make room for, and the text column
+		-- is hidden)
+		self:_WrapAccessory(false)
+	elseif room > 0 and width > 1 then
 		if not self.TextWidth then
 			local description = (self.Description:gsub("<[^>]->", ""))
 			self.TextWidth = math.max(
@@ -2477,8 +2481,17 @@ function RowMethods:_ApplyDisabled()
 	end
 end
 
+-- Runs fn when the row is destroyed.
+function RowMethods:_OnDestroy(fn)
+	self.DestroyHooks = self.DestroyHooks or {}
+	table.insert(self.DestroyHooks, fn)
+end
+
 function RowMethods:Destroy()
 	self.Destroyed = true
+	for _, fn in ipairs(self.DestroyHooks or {}) do
+		pcall(fn)
+	end
 	if self.Capture then
 		self.Capture:Disconnect()
 		self.Capture = nil
@@ -4032,6 +4045,18 @@ function Container:AddCheckbox(idx, info)
 	return self:AddToggle(idx, info)
 end
 
+-- A page doesn't scroll under a finger dragging a slider. Counted, since two
+-- sliders on a page can be held at once.
+local ScrollLocks = setmetatable({}, { __mode = "k" })
+local function LockPageScrolling(page, lock)
+	if not page then
+		return
+	end
+	local count = math.max((ScrollLocks[page] or 0) + (lock and 1 or -1), 0)
+	ScrollLocks[page] = count
+	page.ScrollingEnabled = count == 0
+end
+
 function Container:AddSlider(idx, info)
 	idx, info = ParseArgs(idx, info)
 	local row = CreateRow(self, info)
@@ -4181,12 +4206,17 @@ function Container:AddSlider(idx, info)
 		RenderKnob()
 	end)
 	-- a finger sliding along the track shouldn't also scroll the page
+	local scrollLocked = false
 	local function PageScrolling(enabled)
-		local page = row.Tab and row.Tab.Page
-		if page then
-			page.ScrollingEnabled = enabled
+		if scrollLocked == not enabled then
+			return
 		end
+		scrollLocked = not enabled
+		LockPageScrolling(row.Tab and row.Tab.Page, scrollLocked)
 	end
+	row:_OnDestroy(function()
+		PageScrolling(true) -- (removed mid-drag)
+	end)
 	hit.InputBegan:Connect(function(input)
 		if IsPointer(input) and not row.Disabled then
 			knobState.Dragging = input
@@ -7344,8 +7374,8 @@ local function CreateAcrylic(target)
 	end
 
 	function controller:SetEnabled(enabled)
-		-- (a delayed call can arrive after Destroy)
-		enabled = enabled == true and not self.Destroyed
+		-- (a delayed call can arrive after Destroy, or after the library unloaded)
+		enabled = enabled == true and not self.Destroyed and not MacUI.Unloaded
 		if enabled == self.Enabled then
 			return
 		end
@@ -7571,7 +7601,11 @@ function MacUI:CreateWindow(config)
 		StateChanged = Signal.new(),
 		Commands = {},
 	}
-	table.insert(self.Windows, Window)
+	-- (a copy that stepped aside above still builds its window for the script,
+	-- but it isn't one of the library's windows)
+	if not self.Unloaded then
+		table.insert(self.Windows, Window)
+	end
 	local Cleanup = {}
 	EnsureLibraryInput()
 
@@ -7618,11 +7652,12 @@ function MacUI:CreateWindow(config)
 	InterfaceRoots[Root] = true
 	-- Roblox frees a locked mouse (first person, shift lock) while a modal
 	-- button is visible: this one is, whenever the window is open.
-	New("TextButton", {
+	local MouseUnlock = New("TextButton", {
 		Name = "MouseUnlock",
 		Modal = true,
 		BackgroundTransparency = 1,
 		Size = UDim2.fromOffset(1, 1),
+		Visible = false,
 		Parent = Root,
 	})
 
@@ -8033,22 +8068,26 @@ function MacUI:CreateWindow(config)
 		TextSize = 15,
 		Weight = Enum.FontWeight.Bold,
 		Size = UDim2.fromOffset(0, 18),
+		AutomaticSize = Enum.AutomaticSize.X,
 		TextTruncate = Enum.TextTruncate.AtEnd,
 		LayoutOrder = 1,
 		Theme = { TextColor3 = "Text" },
 		Parent = TitleStack,
 	})
+	local TitleLimit = New("UISizeConstraint", { MaxSize = Vector2.new(math.huge, 18), Parent = TitleLabel })
 	local SubtitleLabel = New("TextLabel", {
 		Name = "Subtitle",
 		Text = Window.SubTitle,
 		TextSize = 12,
 		Size = UDim2.fromOffset(0, 15),
+		AutomaticSize = Enum.AutomaticSize.X,
 		TextTruncate = Enum.TextTruncate.AtEnd,
 		LayoutOrder = 2,
 		Visible = Window.SubTitle ~= "",
 		Theme = { TextColor3 = "SubText" },
 		Parent = TitleStack,
 	})
+	local SubtitleLimit = New("UISizeConstraint", { MaxSize = Vector2.new(math.huge, 15), Parent = SubtitleLabel })
 
 	-- Search field
 	local SearchWidth = config.SearchWidth or 180
@@ -8065,18 +8104,13 @@ function MacUI:CreateWindow(config)
 	local SearchStroke = Stroke(Search, "Accent", 3, 1)
 
 	-- The title and subtitle take the room between the navigation buttons and
-	-- the search field, and end in "…" when a narrow window can't fit them.
-	local titleWidths = {}
+	-- the search field (at their own font's width), and end in "…" when a
+	-- narrow window can't fit them.
 	local function FitTitles()
 		local scale = RootScale.Scale
 		local toolbarWidth = Toolbar.AbsoluteSize.X / scale
 		if toolbarWidth < 1 or scale <= 0 then
 			return
-		end
-		if titleWidths.Text ~= TitleLabel.Text or titleWidths.SubText ~= SubtitleLabel.Text then
-			titleWidths.Text, titleWidths.SubText = TitleLabel.Text, SubtitleLabel.Text
-			titleWidths.Title = math.ceil(MeasureText(TitleLabel.Text, 15, Enum.FontWeight.Bold)) + 2
-			titleWidths.Subtitle = math.ceil(MeasureText(SubtitleLabel.Text, 12)) + 2
 		end
 		local left = (TitleStack.AbsolutePosition.X - Toolbar.AbsolutePosition.X) / scale
 		-- in a narrow window the search field gives up some width first
@@ -8086,8 +8120,8 @@ function MacUI:CreateWindow(config)
 		end
 		local right = Search.Visible and (searchWidth + 14 + 12) or 14
 		local room = math.max(toolbarWidth - left - right, 0)
-		TitleLabel.Size = UDim2.fromOffset(math.min(titleWidths.Title, room), 18)
-		SubtitleLabel.Size = UDim2.fromOffset(math.min(titleWidths.Subtitle, room), 15)
+		TitleLimit.MaxSize = Vector2.new(room, 18)
+		SubtitleLimit.MaxSize = Vector2.new(room, 15)
 	end
 	Toolbar:GetPropertyChangedSignal("AbsoluteSize"):Connect(FitTitles)
 	TitleStack:GetPropertyChangedSignal("AbsolutePosition"):Connect(FitTitles)
@@ -9721,6 +9755,7 @@ function MacUI:CreateWindow(config)
 		Window:_ClosePopup(true)
 		HideTooltip()
 		Window.Shown = visible
+		MouseUnlock.Visible = visible -- (the mouse locks again as soon as it hides)
 		if visible then
 			Root.Visible = true
 			BeginTransition()
@@ -9861,6 +9896,9 @@ function MacUI:CreateWindow(config)
 	end
 
 	function Window:SetAcrylic(enabled)
+		if MacUI.Unloaded then
+			return false
+		end
 		if Guard.Engaged and not Guard.Applying and Guard.Saved then
 			-- effects are paused: remember the choice for when they come back
 			Guard.Saved.Acrylic[Window] = (enabled == true) or nil
