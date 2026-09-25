@@ -1,13 +1,15 @@
 --[[
-	MacUI — full demo
-	Every component in one window. Paste into your executor.
+	MacUI — example hub
+	What a finished hub built with MacUI looks like. Paste into your executor.
+	For a tour of every function, run Demo_FullHub.lua instead.
 
 	Once it's open:
 	  • Ctrl + K (Cmd + K on Mac) opens Spotlight: type to find any setting,
-	    press Enter to flip a toggle or run a button.
-	  • Right-click any row to reset it, copy its value or give it a
-	    keyboard shortcut.
-	  • Right Ctrl hides and shows the window.
+	    press Enter to flip a toggle or run a button. Type a setting and a
+	    value ("walk speed 50", "auto farm off in 30m") to change it.
+	  • Right-click any row to reset it, copy its value, give it a keyboard
+	    shortcut or, for switches and buttons, a timer.
+	  • Ctrl + Z undoes a change; Right Ctrl hides and shows the window.
 ]]
 
 local BASE = "https://raw.githubusercontent.com/Kiwzu/Mac-OS-UI-LUA/refs/heads/main/"
@@ -34,6 +36,7 @@ local Window = MacUI:CreateWindow({
 	Profile = true, -- avatar + name at the top of the sidebar
 	MinimizeKey = Enum.KeyCode.RightControl,
 	Acrylic = false, -- frosted-glass sidebar (users can switch it on in Appearance)
+	PerformanceGuard = true, -- pause blur and animations if the game slows down
 })
 
 -- A description turns the top of a page into a System Settings-style header.
@@ -448,8 +451,16 @@ Tips:AddParagraph({
 	Content = "Press <b>Ctrl + K</b> to search every setting in this window. Enter flips a toggle or runs a button; Shift + Enter just shows it.",
 })
 Tips:AddParagraph({
+	Title = "Type to control",
+	Content = "In Spotlight, type a setting and a value, like <b>walk speed 50</b> or <b>auto farm off in 30m</b>, then press Enter.",
+})
+Tips:AddParagraph({
 	Title = "Right-click menus",
-	Content = "Right-click (or long-press) any row to reset it, copy its value or assign a keyboard shortcut.",
+	Content = "Right-click (or long-press) any row to reset it, copy its value or assign a keyboard shortcut. Switches can turn themselves off after a while, and buttons can repeat.",
+})
+Tips:AddParagraph({
+	Title = "Undo",
+	Content = "Changed something by mistake? <b>Ctrl + Z</b> undoes it and <b>Ctrl + Shift + Z</b> redoes it.",
 })
 
 local Loader = Tabs.About:AddSection({ Title = "Load MacUI" })
