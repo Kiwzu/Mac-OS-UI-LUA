@@ -217,7 +217,7 @@ Section:AddKeybind("Key", { Title = "Toggle key", Default = "Q", Mode = "Toggle"
 -- Colour well (Transparency adds an opacity slider)
 Section:AddColorpicker("Color", { Title = "Fill", Default = Color3.fromRGB(10, 132, 255), Transparency = 0.5, Callback = function(color) end })
 
--- Segmented control
+-- Segmented control (with more than MaxSegments options, 5 by default, it shows as a pop-up menu)
 Section:AddSegmented("Part", { Title = "Target", Values = { "Head", "Torso" }, Default = "Head", Callback = function(v) end })
 
 -- Buttons: a chevron row, or a push button when ButtonText is set (Style: "Primary" | "Destructive").
@@ -276,6 +276,7 @@ Changes the user makes to indexed toggles, sliders, menus, text fields, keybinds
 MacUI:Undo()  MacUI:Redo()                  -- also Ctrl/Cmd + Z, Ctrl/Cmd + Shift + Z and Ctrl + Y
 MacUI:CanUndo()  MacUI:CanRedo()  MacUI:ClearHistory()
 MacUI:SetUndoEnabled(false)
+MacUI:Quietly(function() Options.Mode:SetValue("Easy") end)  -- kept out of undo, macros and suggestions
 ```
 
 ## Automation
@@ -433,13 +434,13 @@ local ok, reason = SaveManager:ImportConfig(code)
 
 Profiles also store toggle and button shortcuts, steppers, radio groups and recorded macros. A saved value only goes back into the same kind of control, so a profile from an older version of your script can't break a control you've since changed, and a file error is reported instead of stopping your script.
 
-**Theme editor.** `ThemeManager:BuildThemeEditor(tab)` adds a folded "Theme editor" section: pick a starting theme, change the window, sidebar, group, control and text colours with a live preview, then save it under a name. Saved themes go in `<folder>/themes` and show up in every theme menu. Load them before building the Interface section, so its theme picker is built with them:
+**Theme editor.** `ThemeManager:BuildThemeEditor(tab)` adds a folded "Theme editor" section: pick a starting theme, change the window, sidebar, group, control and text colours with a live preview, then save it under a name. The editor follows the theme in use, so an edit never lands on top of a different theme. A saved theme keeps every colour, so it doesn't depend on the theme it started from. Saved themes go in `<folder>/themes` and show up in every theme picker, which turns into a menu once there are more than five:
 
 ```lua
 local ThemeManager = loadstring(game:HttpGet(BASE .. "ThemeManager.lua"))()
 ThemeManager:SetLibrary(MacUI)
 ThemeManager:SetFolder("MyHub")
-ThemeManager:LoadCustomThemes()                  -- before InterfaceManager:BuildInterfaceSection
+ThemeManager:LoadCustomThemes()                  -- so a saved custom theme can come back at startup
 ThemeManager:BuildThemeEditor(SettingsTab)
 -- from code: ThemeManager:SaveCustomTheme(name, { Background = Color3… }, "Dark"), ThemeManager:DeleteCustomTheme(name)
 ```

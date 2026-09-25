@@ -175,7 +175,8 @@ function InterfaceManager:BuildInterfaceSection(tab)
 		Icon = "monitor",
 	})
 
-	-- a segmented control for a few themes, a menu once there are custom ones
+	-- a segmented control for a few themes; it turns into a menu by itself
+	-- once there are more (custom themes added later included)
 	local themeNames = library:GetThemes()
 	local themeInfo = {
 		Title = "Appearance",
@@ -190,8 +191,7 @@ function InterfaceManager:BuildInterfaceSection(tab)
 			end
 		end,
 	}
-	local themeControl = #themeNames <= 5 and section:AddSegmented("InterfaceTheme", themeInfo)
-		or section:AddDropdown("InterfaceTheme", themeInfo)
+	local themeControl = section:AddSegmented("InterfaceTheme", themeInfo)
 	if library.ThemesChanged then
 		library.ThemesChanged:Connect(function(names)
 			themeControl:SetValues(names)

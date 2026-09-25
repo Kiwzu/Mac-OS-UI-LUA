@@ -34,9 +34,18 @@ local ThemeManager = {
 
 local BUILT_IN = { Dark = true, Light = true, Midnight = true }
 ThemeManager.__index = ThemeManager
+-- the built-in theme each custom theme was made from (it supplies colours
+-- that newer versions of MacUI add)
+ThemeManager.ThemeBases = {}
 
 local function HasFileApi()
 	return type(writefile) == "function" and type(readfile) == "function" and type(isfile) == "function"
+end
+
+-- Executor file functions can throw (a bad path, a full disk, a sandbox rule).
+local function Try(fn, ...)
+	local ok, result = pcall(fn, ...)
+	return ok, result
 end
 
 local function EnsureFolder(path)
@@ -46,8 +55,9 @@ local function EnsureFolder(path)
 	local current = ""
 	for part in string.gmatch(path, "[^/]+") do
 		current = current == "" and part or (current .. "/" .. part)
-		if not isfolder(current) then
-			makefolder(current)
+		local ok, exists = Try(isfolder, current)
+		if not ok or not exists then
+			Try(makefolder, current)
 		end
 	end
 end
@@ -95,13 +105,13 @@ end
 
 function ThemeManager:SaveDefault(name)
 	if not HasFileApi() then
-		return
+		return false
 	end
 	EnsureFolder(self.Folder)
-	writefile(self.Folder .. "/theme.json", HttpService:JSONEncode({
+	return (Try(writefile, self.Folder .. "/theme.json", HttpService:JSONEncode({
 		Theme = name or self.CurrentTheme,
 		Accent = self.Library and self.Library.Accent:ToHex() or nil,
-	}))
+	})))
 end
 
 function ThemeManager:LoadDefault()
@@ -109,7 +119,8 @@ function ThemeManager:LoadDefault()
 		return
 	end
 	local path = self.Folder .. "/theme.json"
-	if not isfile(path) then
+	local found, exists = Try(isfile, path)
+	if not found or not exists then
 		return
 	end
 	local ok, data = pcall(function()
@@ -131,6 +142,23 @@ function ThemeManager:_ThemeFolder()
 	return self.Folder .. "/themes"
 end
 
+-- The built-in theme a theme comes from: its own name, the one it was made
+-- from, or (for a theme a script added) Light or Dark by its background.
+function ThemeManager:_BuiltInBase(name)
+	if BUILT_IN[name] then
+		return name
+	elseif self.ThemeBases[name] then
+		return self.ThemeBases[name]
+	end
+	local theme = self.Library and self.Library.Themes[name]
+	local background = theme and theme.Background
+	if typeof(background) == "Color3" then
+		local luminance = 0.2126 * background.R + 0.7152 * background.G + 0.0722 * background.B
+		return luminance > 0.5 and "Light" or "Dark"
+	end
+	return "Dark"
+end
+
 -- Registers every theme saved with the editor.
 function ThemeManager:LoadCustomThemes()
 	local library = self.Library
@@ -138,31 +166,70 @@ function ThemeManager:LoadCustomThemes()
 		return
 	end
 	local folder = self:_ThemeFolder()
-	if not isfolder(folder) then
+	local found, exists = Try(isfolder, folder)
+	if not found or not exists then
 		return
 	end
-	for _, file in ipairs(listfiles(folder)) do
-		local name = file:gsub("\\", "/"):match("([^/]+)%.json$")
+	local listed, files = Try(listfiles, folder)
+	local pending = {}
+	for _, file in ipairs(listed and type(files) == "table" and files or {}) do
+		local name = tostring(file):gsub("\\", "/"):match("([^/]+)%.json$")
 		if name and not BUILT_IN[name] then
 			local ok, data = pcall(function()
 				return HttpService:JSONDecode(readfile(file))
 			end)
 			if ok and type(data) == "table" then
+				-- colours are hex strings; transparencies and the like, numbers
 				local tokens = {}
-				for token, hex in pairs(type(data.Tokens) == "table" and data.Tokens or {}) do
-					local parsed, color = pcall(Color3.fromHex, tostring(hex))
-					if parsed then
-						tokens[token] = color
+				for token, value in pairs(type(data.Tokens) == "table" and data.Tokens or {}) do
+					if type(value) == "number" then
+						tokens[token] = value
+					else
+						local parsed, color = pcall(Color3.fromHex, tostring(value))
+						if parsed then
+							tokens[token] = color
+						end
 					end
 				end
-				library:AddTheme(name, tokens, library.Themes[data.Base] and data.Base or "Dark")
+				table.insert(pending, { Name = name, Base = data.Base, Tokens = tokens })
 			end
 		end
 	end
+	-- a theme made from another saved theme loads after it (older files
+	-- saved only the changed colours on top of their base)
+	local progress = true
+	while #pending > 0 and progress do
+		progress = false
+		for index = #pending, 1, -1 do
+			local item = pending[index]
+			local base = item.Base
+			if base == nil or library.Themes[base] or not self:_Pending(pending, base) then
+				base = library.Themes[base] and base or "Dark"
+				self.ThemeBases[item.Name] = self:_BuiltInBase(base)
+				library:AddTheme(item.Name, item.Tokens, base)
+				table.remove(pending, index)
+				progress = true
+			end
+		end
+	end
+	for _, item in ipairs(pending) do -- (two themes made from each other)
+		self.ThemeBases[item.Name] = "Dark"
+		library:AddTheme(item.Name, item.Tokens, "Dark")
+	end
 end
 
--- Saves and registers a theme. `tokens` maps token names to Color3s. Returns
--- true and the cleaned-up name, or false and a reason.
+function ThemeManager:_Pending(pending, name)
+	for _, item in ipairs(pending) do
+		if item.Name == name then
+			return true
+		end
+	end
+	return false
+end
+
+-- Saves and registers a theme. `tokens` maps token names to Color3s (the
+-- rest come from `base`). Returns true and the cleaned-up name, or false and
+-- a reason. The whole theme is saved, so it doesn't depend on its base later.
 function ThemeManager:SaveCustomTheme(name, tokens, base)
 	name = (tostring(name or ""):gsub("[^%w%s%-_]", ""))
 	name = (name:gsub("^%s+", ""):gsub("%s+$", ""))
@@ -171,17 +238,29 @@ function ThemeManager:SaveCustomTheme(name, tokens, base)
 	elseif BUILT_IN[name] then
 		return false, "“" .. name .. "” is a built-in theme."
 	end
+	local library = self.Library
+	local merged = table.clone(library.Themes[base] or library.Themes[library.ThemeName] or library.Themes.Dark)
+	for token, value in pairs(tokens or {}) do
+		merged[token] = value
+	end
+	local root = self:_BuiltInBase(base or library.ThemeName)
 	local encoded = {}
-	for token, color in pairs(tokens or {}) do
-		if typeof(color) == "Color3" then
-			encoded[token] = color:ToHex()
+	for token, value in pairs(merged) do
+		if typeof(value) == "Color3" then
+			encoded[token] = value:ToHex()
+		elseif type(value) == "number" then
+			encoded[token] = value
 		end
 	end
 	if HasFileApi() then
 		EnsureFolder(self:_ThemeFolder())
-		writefile(self:_ThemeFolder() .. "/" .. name .. ".json", HttpService:JSONEncode({ Base = base or "Dark", Tokens = encoded }))
+		local written, err = Try(writefile, self:_ThemeFolder() .. "/" .. name .. ".json", HttpService:JSONEncode({ Base = root, Tokens = encoded }))
+		if not written then
+			return false, "Couldn’t write the theme file (" .. tostring(err) .. ")."
+		end
 	end
-	self.Library:AddTheme(name, tokens, base)
+	self.ThemeBases[name] = root
+	library:AddTheme(name, merged, root)
 	return true, name
 end
 
@@ -191,9 +270,13 @@ function ThemeManager:DeleteCustomTheme(name)
 		return false
 	end
 	local path = self:_ThemeFolder() .. "/" .. tostring(name) .. ".json"
-	if type(delfile) == "function" and HasFileApi() and isfile(path) then
-		delfile(path)
+	if type(delfile) == "function" and HasFileApi() then
+		local found, exists = Try(isfile, path)
+		if found and exists then
+			Try(delfile, path)
+		end
 	end
+	self.ThemeBases[name] = nil
 	return self.Library:RemoveTheme(name)
 end
 
@@ -234,15 +317,25 @@ function ThemeManager:BuildThemeEditor(tab)
 			end
 		end)
 	end
+	-- (the editor's own updates stay out of undo and suggestions)
+	local function Quietly(fn)
+		if library.Quietly then
+			library:Quietly(fn)
+		else
+			fn()
+		end
+	end
 	local function LoadFrom(name)
 		local theme = library.Themes[name] or library.ThemeData
 		local wasReady = ready
 		ready = false
-		for _, spec in ipairs(self.EditorTokens) do
-			if theme[spec[1]] then
-				pickers[spec[1]]:SetValueRGB(theme[spec[1]])
+		Quietly(function()
+			for _, spec in ipairs(self.EditorTokens) do
+				if theme[spec[1]] then
+					pickers[spec[1]]:SetValueRGB(theme[spec[1]])
+				end
 			end
-		end
+		end)
 		ready = wasReady
 	end
 	local function Notify(title, content, failed)
@@ -295,8 +388,8 @@ function ThemeManager:BuildThemeEditor(tab)
 		Description = "Go back to the theme you're using.",
 		ButtonText = "Discard",
 		Callback = function()
+			-- (the editor follows, below)
 			library:SetTheme(library.ThemeName, true)
-			LoadFrom(library.ThemeName)
 		end,
 	})
 	section:AddButton({
@@ -316,6 +409,20 @@ function ThemeManager:BuildThemeEditor(tab)
 	})
 	library.ThemesChanged:Connect(function(names)
 		baseControl:SetValues(names)
+	end)
+	-- The editor follows the theme in use (picked elsewhere, saved or
+	-- discarded), so an edit never lands on top of a different theme.
+	library.ThemeChanged:Connect(function(name)
+		if library.Unloaded or not library.Themes[name] then
+			return
+		end
+		local wasReady = ready
+		ready = false
+		Quietly(function()
+			baseControl:SetValue(name)
+		end)
+		LoadFrom(name)
+		ready = wasReady
 	end)
 	ready = true
 	return section

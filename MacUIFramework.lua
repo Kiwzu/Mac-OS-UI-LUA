@@ -3251,6 +3251,13 @@ local function AutomationApply(fn, ...)
 	end
 end
 
+-- Runs fn with the changes it makes kept out of undo, macros and Spotlight's
+-- suggestions: for code that updates controls to match something else (an
+-- editor following the current theme, say).
+function MacUI:Quietly(fn, ...)
+	AutomationApply(fn, ...)
+end
+
 -- Stands in for a nil value (a cleared menu), so "no snapshot yet" and "empty"
 -- aren't confused.
 local NIL_VALUE = setmetatable({}, {
@@ -5153,6 +5160,77 @@ function Container:AddSegmented(idx, info)
 	List(items, Enum.FillDirection.Horizontal, 0)
 	Padding(items, 0, 2, 0, 2)
 
+	-- With more options than make sensible segments (a theme list that grew,
+	-- say) it shows as a pop-up menu instead. MaxSegments sets how many.
+	local maxSegments = math.max(math.floor(tonumber(info.MaxSegments) or 5), 2)
+	local menuButton, menuLabel
+	local function MenuButton()
+		if menuButton then
+			return
+		end
+		menuButton = New("TextButton", {
+			Name = "PopupButton",
+			Size = UDim2.fromOffset(0, 26),
+			AutomaticSize = Enum.AutomaticSize.X,
+			Visible = false,
+			Parent = row.Accessory,
+		})
+		List(menuButton, Enum.FillDirection.Horizontal, 7, { VerticalAlignment = Enum.VerticalAlignment.Center })
+		menuLabel = New("TextLabel", {
+			Name = "Value",
+			TextSize = 14,
+			Size = UDim2.fromOffset(0, 18),
+			AutomaticSize = Enum.AutomaticSize.X,
+			TextTruncate = Enum.TextTruncate.AtEnd,
+			LayoutOrder = 1,
+			Theme = { TextColor3 = "Text" },
+			Parent = menuButton,
+		})
+		New("UISizeConstraint", { MaxSize = Vector2.new(200, 18), Parent = menuLabel })
+		local capsule = New("Frame", {
+			Name = "Chevrons",
+			Size = UDim2.fromOffset(17, 21),
+			LayoutOrder = 2,
+			Theme = { BackgroundColor3 = "Control" },
+			Parent = menuButton,
+		})
+		Corner(capsule, 5)
+		IconImage({
+			Icon = "chevrons-up-down",
+			IconSize = 12,
+			AnchorPoint = Vector2.new(0.5, 0.5),
+			Position = UDim2.fromScale(0.5, 0.5),
+			Theme = { ImageColor3 = "Text" },
+			Parent = capsule,
+		})
+		menuButton.MouseButton1Click:Connect(function()
+			if row.Disabled then
+				return
+			end
+			window:_OpenMenu(menuButton, {
+				Values = Segmented.Values,
+				MinWidth = math.max(menuButton.AbsoluteSize.X / window:GetAbsoluteScale() + 24, 170),
+				IsSelected = function(value)
+					return Segmented.Value == value
+				end,
+				OnPick = function(value)
+					Segmented:SetValue(value)
+				end,
+			})
+		end)
+	end
+	local function UpdateMode()
+		local asMenu = #Segmented.Values > maxSegments
+		if asMenu then
+			MenuButton()
+		end
+		control.Visible = not asMenu
+		if menuButton then
+			menuButton.Visible = asMenu
+			menuLabel.Text = Segmented.Value ~= nil and tostring(Segmented.Value) or "None"
+		end
+	end
+
 	local buttons = {}
 	local function MovePill(duration)
 		local button = buttons[Segmented.Value]
@@ -5209,6 +5287,7 @@ function Container:AddSegmented(idx, info)
 			end)
 		end
 		MovePill(0)
+		UpdateMode()
 	end
 
 	function Segmented:SetValue(value)
@@ -5217,6 +5296,7 @@ function Container:AddSegmented(idx, info)
 		end
 		self.Value = value
 		MovePill()
+		UpdateMode()
 		self:_Emit(value)
 	end
 
