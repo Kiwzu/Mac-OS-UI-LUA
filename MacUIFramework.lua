@@ -7,7 +7,7 @@
 
 	MacUI — a macOS System Settings–style interface library for Roblox.
 
-	Version : 4.3.0
+	Version : 4.4.0
 	Author  : Kiwzu  (https://github.com/Kiwzu/Mac-OS-UI-LUA)
 	Icons   : Lucide (ISC license) via the asset ids published with Fluent (MIT)
 
@@ -16,7 +16,7 @@
 ]]
 
 local MacUI = {
-	Version = "4.3.0",
+	Version = "4.4.0",
 	Options = {},
 	Windows = {},
 	Unloaded = false,
