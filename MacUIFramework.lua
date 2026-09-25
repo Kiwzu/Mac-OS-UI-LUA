@@ -8437,6 +8437,13 @@ function MacUI:CreateWindow(config)
 
 	local function FitToScreen()
 		if Window.Maximized then
+			-- the screen or the scale changed: fill the screen again
+			local viewport = ScreenSize()
+			if viewport.X >= 10 and viewport.Y >= 10 then
+				Window.Size = Vector2.new((viewport.X - 24) / Window.Scale, (viewport.Y - 24) / Window.Scale)
+				Root.Size = UDim2.fromOffset(Window.Size.X, Window.Size.Y)
+				Root.Position = UDim2.fromScale(0.5, 0.5)
+			end
 			return
 		end
 		local fitted, position = FittedLayout(Root.Position)
@@ -11645,14 +11652,8 @@ function MacUI:CreateWindow(config)
 		end
 	end)
 
-	Connect(ScreenGui:GetPropertyChangedSignal("AbsoluteSize"), function()
-		FitToScreen() -- a rotated phone, a resized game window
-		if Window.Maximized then
-			local viewport = ScreenGui.AbsoluteSize
-			Window.Size = Vector2.new((viewport.X - 24) / Window.Scale, (viewport.Y - 24) / Window.Scale)
-			Root.Size = UDim2.fromOffset(Window.Size.X, Window.Size.Y)
-		end
-	end)
+	-- a rotated phone, a resized game window
+	Connect(ScreenGui:GetPropertyChangedSignal("AbsoluteSize"), FitToScreen)
 
 	function Window:Destroy()
 		MacUI:Destroy()
