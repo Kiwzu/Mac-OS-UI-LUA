@@ -1,8 +1,9 @@
 --[[
 	MacUI · InterfaceManager
 	Builds the "Interface" settings section (theme, accent, frosted glass,
-	scale, motion, shortcut list, window memory, toggle key) and remembers
-	those choices between sessions. API-compatible with Fluent's
+	scale, motion, frame-rate protection, shortcut list, window memory,
+	toggle key) and remembers those choices between sessions, along with
+	what Spotlight learned about the settings you use most. API-compatible with Fluent's
 	InterfaceManager.
 
 	InterfaceManager:SetLibrary(MacUI)
@@ -26,6 +27,7 @@ local InterfaceManager = {
 		MenuKeybind = "RightControl",
 		Acrylic = false,
 		ReduceMotion = false,
+		PerformanceGuard = false,
 		ShortcutList = false,
 		RememberWindow = true,
 		Window = nil, -- last position, size, page and sidebar state
@@ -119,18 +121,32 @@ function InterfaceManager:BuildInterfaceSection(tab)
 			settings.Accent = name
 		end
 	end
-	settings.ReduceMotion = library.ReduceMotion == true
+	-- (the Get* versions ignore effects the performance guard has paused)
+	if library.GetReduceMotion then
+		settings.ReduceMotion = library:GetReduceMotion()
+	else
+		settings.ReduceMotion = library.ReduceMotion == true
+	end
+	settings.PerformanceGuard = library.PerformanceGuard == true
 	local first = library.Windows and library.Windows[1]
 	if first then
-		settings.Acrylic = first.Acrylic == true
+		if first.GetAcrylic then
+			settings.Acrylic = first:GetAcrylic()
+		else
+			settings.Acrylic = first.Acrylic == true
+		end
 		settings.ShortcutList = first.KeybindListVisible == true
 		settings.MenuKeybind = first.MinimizeKey and first.MinimizeKey.Name or "None"
 		settings.Scale = math.clamp(math.floor((first.Scale or 1) * 20 + 0.5) * 5, 60, 130)
 	end
 	-- ...then apply what the user chose last time.
 	self:LoadSettings()
+	-- a saved custom theme may only be registered later (ThemeManager)
+	local pendingTheme
 	if saved.Theme and library.Themes[saved.Theme] then
 		library:SetTheme(saved.Theme, true)
+	elseif saved.Theme then
+		pendingTheme = saved.Theme
 	end
 	if saved.Accent and library.Accents[saved.Accent] then
 		library:SetAccent(saved.Accent, true)
@@ -141,6 +157,17 @@ function InterfaceManager:BuildInterfaceSection(tab)
 	if saved.ReduceMotion ~= nil and library.SetReduceMotion then
 		library:SetReduceMotion(saved.ReduceMotion == true)
 	end
+	-- what Spotlight learned about which settings get used most
+	if type(saved.Usage) == "table" and library.SetUsage then
+		library:SetUsage(saved.Usage)
+	end
+	if library.UsageChanged then
+		library.UsageChanged:Connect(function()
+			if ready then
+				self:Set("Usage", library:GetUsage())
+			end
+		end)
+	end
 
 	local section = tab:AddSection({
 		Title = "Interface",
@@ -148,19 +175,33 @@ function InterfaceManager:BuildInterfaceSection(tab)
 		Icon = "monitor",
 	})
 
-	local themeControl = section:AddSegmented("InterfaceTheme", {
+	-- a segmented control for a few themes; it turns into a menu by itself
+	-- once there are more (custom themes added later included)
+	local themeNames = library:GetThemes()
+	local themeInfo = {
 		Title = "Appearance",
-		Values = library:GetThemes(),
+		Values = themeNames,
 		Default = library.ThemeName,
 		Callback = function(value)
-			if value ~= library.ThemeName then
+			if value and value ~= library.ThemeName then
 				library:SetTheme(value)
 			end
-			if ready then
+			if ready and value then
 				self:Set("Theme", value)
 			end
 		end,
-	})
+	}
+	local themeControl = section:AddSegmented("InterfaceTheme", themeInfo)
+	if library.ThemesChanged then
+		library.ThemesChanged:Connect(function(names)
+			themeControl:SetValues(names)
+			if pendingTheme and library.Themes[pendingTheme] then
+				local name = pendingTheme
+				pendingTheme = nil
+				library:SetTheme(name, true)
+			end
+		end)
+	end
 
 	local accentNames = table.clone(library.AccentOrder)
 	local accentControl = section:AddDropdown("InterfaceAccent", {
@@ -250,6 +291,22 @@ function InterfaceManager:BuildInterfaceSection(tab)
 			end
 		end,
 	})
+
+	if library.SetPerformanceGuard then
+		section:AddToggle("InterfacePerformanceGuard", {
+			Title = "Protect frame rate",
+			Description = "Pause blur and animations while the game is running slowly.",
+			Default = settings.PerformanceGuard == true,
+			Callback = function(value)
+				if value ~= (library.PerformanceGuard == true) then
+					library:SetPerformanceGuard(value)
+				end
+				if ready then
+					self:Set("PerformanceGuard", value)
+				end
+			end,
+		})
+	end
 
 	section:AddToggle("InterfaceShortcutList", {
 		Title = "Shortcut list",

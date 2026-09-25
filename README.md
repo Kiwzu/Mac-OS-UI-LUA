@@ -2,7 +2,7 @@
 
 **A macOS System Settings–style interface library for Roblox.**
 
-Traffic lights, a frosted sidebar with colourful icon tiles, page headers, grouped inset rows, native-looking controls, Spotlight search, right-click menus, keyboard shortcuts, sheets and Notification Center banners. The API is compatible with [Fluent](https://github.com/dawid-scripts/Fluent), so existing scripts only need a new loadstring.
+Traffic lights, a frosted sidebar with colourful icon tiles, page headers, grouped inset rows, native-looking controls, Spotlight search that also takes typed commands, timers, macros, undo, right-click menus, keyboard shortcuts, live graphs and tables, sheets and Notification Center banners. The API is compatible with [Fluent](https://github.com/dawid-scripts/Fluent), so existing scripts only need a new loadstring.
 
 ![MacUI dark](assets/preview-dark.png)
 
@@ -11,6 +11,10 @@ Traffic lights, a frosted sidebar with colourful icon tiles, page headers, group
 | ![spotlight](assets/preview-spotlight.png) | ![context menu](assets/preview-context-menu.png) | ![light](assets/preview-light.png) |
 | **Colour picker** | **Dialog with a text field** | **Shortcut list** |
 | ![picker](assets/preview-colorpicker.png) | ![dialog](assets/preview-dialog.png) | ![shortcuts](assets/preview-shortcuts.png) |
+| **Graph, table and watermark** | **Commands in Spotlight** | **Loading screen** |
+| ![graph and table](assets/preview-graph-table.png) | ![commands](assets/preview-commands.png) | ![loading](assets/preview-loading.png) |
+| **Type to control** | **Timers, repeats and a macro recording** | **Error inspector** |
+| ![type to control](assets/preview-type-to-control.png) | ![timers and macros](assets/preview-timers-macros.png) | ![error inspector](assets/preview-error-inspector.png) |
 
 > These previews were rendered outside Roblox. In game the text uses Builder Sans and the icons come from Roblox assets, so glyphs look slightly different.
 
@@ -28,15 +32,28 @@ Traffic lights, a frosted sidebar with colourful icon tiles, page headers, group
 - **Spotlight** (Ctrl + K, or Cmd + K on Mac): fuzzy-search every setting and page. Enter flips a toggle or runs a button, Shift + Enter just shows it, and the arrow keys move the selection.
 - **Right-click (or long-press) any row** to reset it to its default, copy its value, select or clear every option in a multi-select, or give it a **keyboard shortcut**.
 - **Shortcuts**: bind a key to any toggle or button from code or from the menu. A small HUD confirms each press ("Auto Farm On"). A floating **shortcut list** shows every keybind and shortcut.
+- **Undo and redo** (Ctrl/Cmd + Z, Ctrl/Cmd + Shift + Z): every change the user makes to a control can be taken back. A slider drag or a loaded profile undoes in one step.
+- **Commands**: add actions ("Rejoin server", "Copy server ID") that live in Spotlight and can have their own key.
+- **Collapsible sections** with a disclosure arrow, for pages with a lot of settings.
 - **Tooltips**, **dependencies** (grey out or hide a row until another option is on), live toolbar **search** (Enter jumps to the first match) and back/forward history.
 - **Remembers itself**: window position, size, page, theme, accent, scale and frosted glass come back next time (InterfaceManager). Profiles can **save automatically** (SaveManager).
 - Re-running your script replaces the old window instead of stacking a second one.
 - **Reduce motion**, automatic scaling on small screens, and touch support.
 
+**Does things for you**
+- **Type to control**: in Spotlight, type "walk speed 50", "auto farm off in 30m" or "difficulty hard" and press Enter.
+- **Timers**: right-click a switch for "Turn Off After…", or a button for "Repeat Every…". A countdown shows on the row.
+- **Macros**: record what you change and press, then replay it with the same timing, once, on a loop or from a key.
+- **Suggestions**: Spotlight learns which settings you use most and shows them first.
+- **Error inspector**: when a callback fails, its row gets a red badge with the message and the line it failed on.
+- **Frame-rate guard**: blur and animations pause while the game is running slowly.
+
 **Complete**
 - Controls: switch, checkbox, slider with an editable value, **stepper**, **radio group**, pop-up menu (single, multi or searchable, plus live **player** and **team** lists), text field, shortcut recorder, colour well with an HSV/hex popover, segmented control, progress bar, key/value label, paragraph, **code block** with a copy button, **image**, and push buttons.
+- **Live graph** (FPS, ping, earnings) and a sortable, selectable **table** (players, logs, stats).
 - Notifications with **action buttons**, dialogs with an optional **text field**, and HUD toasts.
-- Addons: SaveManager (profiles, autoload and autosave, compatible with Fluent config files), InterfaceManager, ThemeManager and AccentManager.
+- A **loading screen** while your script builds, and a draggable **watermark** with FPS, ping and a clock.
+- Addons: SaveManager (profiles, autoload, autosave, and **profile codes** to share settings; compatible with Fluent config files), InterfaceManager, ThemeManager (with a **theme editor** that saves your own themes) and AccentManager.
 
 ---
 
@@ -113,7 +130,19 @@ local Window = MacUI:CreateWindow({
     ConfirmClose = true,            -- ask before the red button unloads the UI
     ReplaceExisting = true,         -- re-running the script closes the old window
     Scale = nil,                    -- fixed UI scale; nil picks one to fit the screen
+    Undo = true,                    -- Ctrl/Cmd + Z undoes the user's last change
+    Loading = false,                -- true, or { Title, Subtitle, Icon, Duration = seconds | false, Timeout = 30 }
+    Watermark = false,              -- true, or the options of MacUI:SetWatermark
+    PerformanceGuard = false,       -- pause blur and animations while the game runs slowly
 })
+```
+
+With `Loading`, the window stays hidden behind a loading card while your script adds its tabs, then opens by itself after `Duration` seconds (1.4 by default). The show/hide key waits until then. With `Duration = false`, drive the bar yourself and open the window when you're ready (if your script never does, the card closes after `Timeout` seconds):
+
+```lua
+local Window = MacUI:CreateWindow({ Title = "My Hub", Loading = { Subtitle = "Fetching data…", Duration = false } })
+Window.Loader:SetProgress(0.5, "Loading items…")   -- 0 to 1, with a status line
+Window:FinishLoading("Ready")
 ```
 
 | Method | Description |
@@ -122,7 +151,7 @@ local Window = MacUI:CreateWindow({
 | `Window:AddTabSection(title)` | Adds a sidebar heading such as "Settings". |
 | `Window:SelectTab(indexOrTab)` | Switches tab. |
 | `Window:GoBack()` / `Window:GoForward()` | Navigates the tab history. |
-| `Window:OpenSpotlight()` / `Window:CloseSpotlight()` | Opens or closes the command palette. |
+| `Window:OpenSpotlight(text)` / `Window:CloseSpotlight()` | Opens or closes the command palette. `text` (optional) is typed in for you. |
 | `Window:Reveal(elementOrIdx)` | Switches to the element's tab, scrolls to it and flashes it. |
 | `Window:Toast(text, { Detail, Icon, Highlight, Duration })` | Shows a short HUD at the bottom of the window. |
 | `Window:Dialog({ Title, Content, Icon, Input, Buttons })` | Shows an alert sheet. The first button is the primary action. |
@@ -136,8 +165,12 @@ local Window = MacUI:CreateWindow({
 | `Window:SetScale(number)` | Scales the whole window. |
 | `Window:SetMinimizeKey(KeyCode or name)` | Changes the show/hide key. |
 | `Window:Search(text)` | Runs the toolbar search programmatically. |
+| `Window:AddCommand({ Title, Description, Icon, IconColor, Keywords, Shortcut, Callback })` | Adds an action to Spotlight (listed before you type, and found by title, description or keywords). `Shortcut` also runs it from the keyboard. Returns a command with `:Run()`, `:SetShortcut(key)` and `:Destroy()`. |
+| `Window:FinishLoading(text)` | Opens a window created with `Loading`. `Window.Loader` is its loading card. |
 
 Tabs have `Tab:SetBadge(number | text | nil)`, `Tab:SetTitle(text)` and `Tab:Select()`.
+
+**Small screens and phones.** The window always fits on screen. On a small screen it gets smaller before its text does, and on a phone the text never goes below 85%. A size saved on a bigger screen, a rotated phone or a resized game window shrinks it and keeps it in view, and it grows back to the size you asked for when there's room. In a narrow window, a control too wide to sit beside its title moves under it. On a phone, the traffic lights and resize corner get finger-sized targets, a button replaces the Ctrl K hint, and keyboard shortcuts are hidden. A drag follows the finger that started it, so the movement thumbstick never moves a slider or the window. While the window is open, the mouse is free in first-person and shift-lock games.
 
 ## Sections
 
@@ -148,9 +181,14 @@ local Section = Tab:AddSection({ Title = "Movement", Description = "Applies inst
 
 Elements added to a section go into its rounded group. Elements added straight to a tab go into a group without a header.
 
+```lua
+local Advanced = Tab:AddSection({ Title = "Advanced", Collapsible = true, Collapsed = true })
+Advanced:SetCollapsed(false)   -- click the title to fold it; search results and Window:Reveal open it
+```
+
 ## Elements
 
-Each element takes an optional index as its first argument, just like Fluent. Elements that have an index are stored in `MacUI.Options[index]` and are picked up by SaveManager.
+Each element takes an optional index as its first argument, just like Fluent. Elements that have an index are stored in `MacUI.Options[index]` and are picked up by SaveManager. As in Fluent, toggles, checkboxes, sliders, steppers and progress bars also run their callback once when they're created, with the default value, so your script starts in step with the interface. The other elements run it only when their value changes.
 
 ```lua
 -- Switch (Style = "Checkbox" or AddCheckbox for a checkbox)
@@ -179,7 +217,7 @@ Section:AddKeybind("Key", { Title = "Toggle key", Default = "Q", Mode = "Toggle"
 -- Colour well (Transparency adds an opacity slider)
 Section:AddColorpicker("Color", { Title = "Fill", Default = Color3.fromRGB(10, 132, 255), Transparency = 0.5, Callback = function(color) end })
 
--- Segmented control
+-- Segmented control (with more than MaxSegments options, 5 by default, it shows as a pop-up menu)
 Section:AddSegmented("Part", { Title = "Target", Values = { "Head", "Torso" }, Default = "Head", Callback = function(v) end })
 
 -- Buttons: a chevron row, or a push button when ButtonText is set (Style: "Primary" | "Destructive").
@@ -191,7 +229,27 @@ local Status = Section:AddLabel("Status", { Title = "Status", Description = "…
 Section:AddParagraph({ Title = "About", Content = "Longer text, <b>rich text</b> supported." })
 local Bar = Section:AddProgress("Quest", { Title = "Quest progress", Max = 25, Default = 0 })         -- Bar:SetValue(10)
 Section:AddCode({ Title = "Loader", Code = 'loadstring(game:HttpGet("…"))()' })                     -- with a copy button
-Section:AddImage({ Title = "Map", Image = "rbxassetid://…", Height = 150, ScaleType = "Crop" })
+Section:AddImage({ Title = "Map", Image = "rbxassetid://…", Height = 150, ScaleType = "Crop" })   -- or an icon name, tinted to the theme (ImageColor to choose)
+
+-- Live bar graph: shows the latest value and the average. Min/Max fix the scale (automatic otherwise).
+local Fps = Section:AddGraph("Fps", { Title = "Frame rate", Points = 40, Min = 0, Suffix = " fps", Height = 76 })
+Fps:Push(60)                                -- also :SetValues(list), :Clear(), :SetRange(min, max)
+
+-- Table: click a header to sort (again to reverse, a third time for the original order), click a row to select it.
+-- Numbers, and text that is a number, sort by value.
+local Players = Section:AddTable("Players", {
+    Title = "Players",
+    Columns = { "Name", { Title = "Level", Align = "Right", Width = 0.5 } },  -- Width: share of the row (default 1)
+    Rows = { { "Builderman", 90 }, { Name = "Noob", Level = 3 } },   -- arrays, or tables keyed by column title
+    MaxRows = 6, SortBy = "Level", Descending = true,
+    Callback = function(row, index) end,
+})
+Players:AddRow({ "Guest", 1 })              -- also :SetRows(list), :RemoveRow(row or index), :Clear(),
+                                            -- :SortBy(column, descending) (nil for the original order),
+                                            -- :Select(index or row), :GetSelected() -> row, index
+
+-- Macro: records what the user changes and presses, then plays it back (see Automation)
+local Routine = Section:AddMacro("Routine", { Title = "Boss rotation", Loop = false, Speed = 1 })
 ```
 
 ### Options every element accepts
@@ -206,9 +264,82 @@ Section:AddImage({ Title = "Map", Image = "rbxassetid://…", Height = 150, Scal
 
 ### Element methods
 
-Every element has `:SetTitle(text)`, `:SetDesc(text)`, `:SetVisible(bool)`, `:SetDisabled(bool)` (also `:Lock()` and `:Unlock()`), `:OnChanged(fn)` and `:Destroy()`. Value elements expose `.Value`, `:SetValue(...)`, `:Reset()`, `:IsDefault()` and `:GetText()`. Toggles and buttons have `:SetShortcut(key)` (`nil` removes it) and `:RecordShortcut()`. Dropdowns, segmented controls and radio groups also have `:SetValues(list)`, and dropdowns have `:Open()`.
+Every element has `:SetTitle(text)`, `:SetDesc(text)`, `:SetVisible(bool)`, `:SetDisabled(bool)` (also `:Lock()` and `:Unlock()`), `:OnChanged(fn)` and `:Destroy()`. Value elements expose `.Value`, `:SetValue(...)`, `:Reset()`, `:IsDefault()` and `:GetText()`. Toggles and buttons have `:SetShortcut(key)` (`nil` removes it) and `:RecordShortcut()`. Dropdowns, segmented controls and radio groups also have `:SetValues(list)`, and dropdowns have `:Open()`. Toggles have `:SetTimer(seconds, value)` and `:GetTimer()`, and buttons have `:SetRepeat(seconds)` (see Automation). When a callback fails, `.LastError` holds the message and `:ClearError()` removes the badge.
 
 `MacUI.OptionChanged` fires `(index, value, element)` whenever any indexed element changes.
+
+### Undo
+
+Changes the user makes to indexed toggles, sliders, menus, text fields, keybinds, colours, segmented controls, steppers and radio groups are recorded. Changes made in the same moment (a slider drag, a loaded profile, a toggle and its knock-on effects) undo as one step. Changes your script makes on its own aren't recorded, and neither are timers or macro playback.
+
+```lua
+MacUI:Undo()  MacUI:Redo()                  -- also Ctrl/Cmd + Z, Ctrl/Cmd + Shift + Z and Ctrl + Y
+MacUI:CanUndo()  MacUI:CanRedo()  MacUI:ClearHistory()
+MacUI:SetUndoEnabled(false)
+MacUI:Quietly(function() Options.Mode:SetValue("Easy") end)  -- kept out of undo, macros and suggestions
+```
+
+## Automation
+
+### Type to control
+
+Spotlight (Ctrl/Cmd + K) understands a setting followed by a value. The matching action is listed first under **Actions**, and Enter applies it (Ctrl + Z undoes it).
+
+| Type | Does |
+| --- | --- |
+| `walk speed 50`, `speed max` | Sets a slider or stepper, clamped to its range |
+| `auto farm off`, `turn on esp`, `toggle esp` | Switches a toggle |
+| `difficulty hard`, `targets pirate` | Picks a menu option, or adds and removes one in a multi-select |
+| `esp color red`, `fill #ff8800` | Sets a colour |
+| `nickname = Bob` | Fills a text field |
+| `auto farm off in 30m` | Starts a timer |
+| `collect every 10s` | Presses a button on repeat |
+| `reset walk speed`, `play boss rotation`, `run rejoin` | Resets a control, plays a macro, runs a command |
+| `light mode`, `accent purple`, `undo`, `cancel timers` | Window actions |
+
+`Window:OpenSpotlight("walk speed ")` opens Spotlight with text already typed. With nothing typed, it suggests the settings you use most. InterfaceManager remembers them between sessions; to save them yourself, use `MacUI:GetUsage()`, `MacUI:SetUsage(t)`, `MacUI:ClearUsage()` and `MacUI.UsageChanged`.
+
+### Timers
+
+```lua
+Toggle:SetTimer(30 * 60)        -- flip it in 30 minutes; SetTimer(seconds, false) turns it off
+Toggle:SetTimer(nil)            -- cancel (changing it by hand cancels too)
+local secondsLeft, turnsTo = Toggle:GetTimer()
+Button:SetRepeat(10)            -- press it every 10 seconds; SetRepeat(nil) stops
+MacUI:GetTimers()  MacUI:CancelTimers()  MacUI.TimersChanged:Connect(function() end)
+```
+
+Users set timers from the right-click menu: 5 minutes, 1 hour, or any time such as `45s` or `1h 30m`. A countdown shows on the row; click it to change or cancel. A notification says when a timer finishes.
+
+### Macros
+
+```lua
+local Routine = Section:AddMacro("Routine", { Title = "Boss rotation" })
+Routine:Record()  Routine:StopRecording()    -- or the record and play buttons on the row
+Routine:Play()  Routine:Play({ Loop = true, Speed = 2 })  Routine:Stop()
+Routine:SetLoop(true)  Routine:Clear()  Routine:Export() -> table  Routine:Import(table)
+```
+
+While recording, the user's changes to indexed controls and their button presses are captured with their timing (a slider drag counts once). A pill under the toolbar shows the step count and has a Stop button. Macros can have a keyboard shortcut, show up in Spotlight, and are saved with SaveManager profiles.
+
+### Error inspector
+
+When a callback errors, its row shows a red badge, and the error is still printed to the console. Hover the badge for the message, or click it for the line it failed on, a **Copy Details** button (full traceback) and **Clear Error**.
+
+```lua
+MacUI.CallbackError:Connect(function(element, message) end)
+MacUI:GetErrors()               -- { { Element, Message, Count }, ... }
+```
+
+### Frame-rate guard
+
+```lua
+MacUI:SetPerformanceGuard(true)                            -- or CreateWindow({ PerformanceGuard = true })
+MacUI:SetPerformanceGuard({ MinFps = 30, Notify = true })
+MacUI.EffectsPaused  MacUI.Fps  MacUI.PerformanceChanged:Connect(function(paused) end)
+```
+
+After 3 seconds below `MinFps`, frosted glass and animations pause and a notification explains why. They come back once the game runs smoothly again. InterfaceManager adds a "Protect frame rate" switch.
 
 ## Notifications, toasts & dialogs
 
@@ -237,6 +368,22 @@ Window:Dialog({
         { Title = "Cancel" },
     },
 })
+
+-- Watermark: a small draggable capsule on top of the game
+local Mark = MacUI:SetWatermark({
+    Text = "My Hub",                 -- or a function returning text
+    Icon = "command",
+    Position = "TopCenter",          -- TopLeft, TopCenter, TopRight, BottomLeft, BottomCenter, BottomRight
+    Fps = true, Ping = true, Clock = false,
+})
+Mark:SetText("My Hub · Farming")     -- also :SetVisible(bool) and :Destroy(); MacUI:SetWatermark(false) removes it
+
+-- Loading card on its own (CreateWindow's Loading option uses this)
+local Loader = MacUI:ShowLoading({ Title = "My Hub", Subtitle = "Loading…", Icon = "command" })
+Loader:SetProgress(0.6, "Fetching data…")   -- the bar sweeps until the first SetProgress
+Loader:Finish("Done")                       -- fills the bar and fades out; :Close() hides it at once
+
+MacUI:SetClipboard("text")           -- false when the executor has no clipboard function
 ```
 
 ## Themes & accents
@@ -249,12 +396,15 @@ MacUI:SetFont("GothamSSm")                  -- any font family name, rbxasset pa
 MacUI:SetReduceMotion(true)                 -- no animations
 MacUI.ThemeChanged:Connect(function(name) end)
 
--- your own theme: start from an existing one and override any colour token
-MacUI:AddTheme("Ocean", { Background = Color3.fromRGB(12, 30, 48), Sidebar = Color3.fromRGB(16, 38, 60) }, "Dark")
+-- your own theme: start from an existing one and override any colour token (a Color3 or a hex string)
+MacUI:AddTheme("Ocean", { Background = Color3.fromRGB(12, 30, 48), Sidebar = "#10263c" }, "Dark")
 MacUI:SetTheme("Ocean")
+MacUI:RemoveTheme("Ocean")                  -- the built-in themes stay
+MacUI:PreviewTheme({ Background = Color3.new(0, 0, 0) })   -- try colours without saving; SetTheme(MacUI.ThemeName) goes back
+MacUI.ThemesChanged:Connect(function(names) end)           -- a theme was added or removed
 ```
 
-The tokens are the keys of `MacUI.Themes.Dark`.
+The tokens are the keys of `MacUI.Themes.Dark`. Adding a theme again under the same name updates it on screen straight away.
 
 ## Addons
 
@@ -265,22 +415,41 @@ local InterfaceManager = loadstring(game:HttpGet(BASE .. "InterfaceManager.lua")
 InterfaceManager:SetLibrary(MacUI)
 InterfaceManager:SetFolder("MyHub")
 InterfaceManager:BuildInterfaceSection(SettingsTab)
--- appearance, accent, frosted glass, size, reduce motion, shortcut list,
--- remember window, show/hide key and unload; all remembered between sessions
+-- appearance, accent, frosted glass, size, reduce motion, protect frame rate,
+-- shortcut list, remember window, show/hide key and unload; all remembered
+-- between sessions, along with Spotlight's suggestions
 
 SaveManager:SetLibrary(MacUI)
 SaveManager:SetFolder("MyHub/" .. game.PlaceId)
 SaveManager:IgnoreThemeSettings()
 SaveManager:BuildConfigSection(SettingsTab)
--- create/load/overwrite profiles, autoload, and "Save changes automatically"
+-- create/load/overwrite/delete profiles, autoload, "Save changes automatically",
+-- and Share / Import buttons that copy and paste a profile code
 SaveManager:LoadAutoloadConfig()
+
+local ok, name = SaveManager:Save("Farming")      -- name: cleaned up to work as a file name
+local code = SaveManager:ExportConfig()          -- the current settings as text
+local ok, reason = SaveManager:ImportConfig(code)
 ```
 
-Profiles also store toggle and button shortcuts, steppers and radio groups. `ThemeManager` (`BuildThemeSection`, `ApplyTheme`, `SaveDefault`/`LoadDefault`) and `AccentManager` (`ChangeAccent`, `BuildAccentDropdown`, `BuildAccentPicker`) are optional helpers. They also keep the MacUI v3 calls working.
+Profiles also store toggle and button shortcuts, steppers, radio groups and recorded macros. A saved value only goes back into the same kind of control, so a profile from an older version of your script can't break a control you've since changed, and a file error is reported instead of stopping your script.
+
+**Theme editor.** `ThemeManager:BuildThemeEditor(tab)` adds a folded "Theme editor" section: pick a starting theme, change the window, sidebar, group, control and text colours with a live preview, then save it under a name. The editor follows the theme in use, so an edit never lands on top of a different theme. A saved theme keeps every colour, so it doesn't depend on the theme it started from. Saved themes go in `<folder>/themes` and show up in every theme picker, which turns into a menu once there are more than five:
+
+```lua
+local ThemeManager = loadstring(game:HttpGet(BASE .. "ThemeManager.lua"))()
+ThemeManager:SetLibrary(MacUI)
+ThemeManager:SetFolder("MyHub")
+ThemeManager:LoadCustomThemes()                  -- so a saved custom theme can come back at startup
+ThemeManager:BuildThemeEditor(SettingsTab)
+-- from code: ThemeManager:SaveCustomTheme(name, { Background = Color3… }, "Dark"), ThemeManager:DeleteCustomTheme(name)
+```
+
+`ThemeManager` also has `BuildThemeSection`, `ApplyTheme` and `SaveDefault`/`LoadDefault`, and `AccentManager` has `ChangeAccent`, `BuildAccentDropdown` and `BuildAccentPicker`. Both are optional helpers that also keep MacUI v3 calls working.
 
 ## Coming from Fluent?
 
-Change the loadstring and it should run: `CreateWindow`, `AddTab`, `AddSection`, every `Add*` element, `Options`, `Notify`, `Dialog`, `SaveManager` and `InterfaceManager` behave the same. Everything else above (Spotlight, context menus, shortcuts, dependencies, tooltips, page headers, steppers, radio groups, code blocks, frosted glass and so on) is extra.
+Change the loadstring and it should run: `CreateWindow`, `AddTab`, `AddSection`, every `Add*` element, `Options`, `Notify`, `Dialog`, `SaveManager` and `InterfaceManager` behave the same. Everything else above (Spotlight, typed commands and suggestions, timers, macros, the error inspector, the frame-rate guard, undo, context menus, shortcuts, dependencies, tooltips, page headers, collapsible sections, steppers, radio groups, graphs, tables, code blocks, the loading screen, the watermark, frosted glass and so on) is extra.
 
 ## Icons
 
